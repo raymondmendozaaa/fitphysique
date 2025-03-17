@@ -5,12 +5,16 @@ import Nav from "./Nav.jsx";
 import MobileNav from "./MobileNav.jsx";
 import Link from "next/link.js";
 import Image from "next/image.js";
-import HamburgerMenu from "./HamburgerMenu.jsx"; // Import the component
+import HamburgerMenu from "./HamburgerMenu.jsx";
+import { supabase } from "@/lib/supabaseClient";
+import { useRouter } from "next/navigation";
 
 const Header = () => {
     const [headerActive, setHeaderActive] = useState(false);
     const [openNav, setOpenNav] = useState(false);
+    const [user, setUser] = useState(null);
     const menuRef = useRef(null);
+    const router = useRouter();
 
     useEffect(() => {
         const handleScroll = () => {
@@ -21,14 +25,41 @@ const Header = () => {
     }, []);
 
     useEffect(() => {
-        const handleClickOutside = (event) => {
-            if (menuRef.current && !menuRef.current.contains(event.target)) {
-                setOpenNav(false);
+        const fetchUser = async () => {
+            const { data, error } = await supabase.auth.getSession();
+            if (error) console.error("Error fetching session:", error);
+            console.log("Session Data:", data); // Debugging log
+            setUser(data?.session?.user || null);
+
+            // Redirect if user is logged in
+            if (data?.session?.user) {
+                router.push("/dashboard");
             }
         };
-        document.addEventListener("mousedown", handleClickOutside);
-        return () => document.removeEventListener("mousedown", handleClickOutside);
+
+        fetchUser();
+
+        // Listen for auth state changes (login/logout)
+        const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+            console.log("Auth Event:", event, "Session:", session); // Debugging log
+            setUser(session?.user || null);
+
+            // Redirect to dashboard if user logs in
+            if (session?.user) {
+                router.push("/dashboard");
+            }
+        });
+
+        return () => {
+            authListener?.subscription.unsubscribe();
+        };
     }, []);
+
+    const handleLogout = async () => {
+        await supabase.auth.signOut();
+        setUser(null);
+        router.push("/");
+    };
 
     return (
         <header
@@ -39,7 +70,7 @@ const Header = () => {
         >
             <div className="container mx-auto h-full flex items-center justify-between">
                 {/* Logo */}
-                <Link href="">
+                <Link href="/">
                     <Image src={"/assets/img/logo.png"} width={117} height={55} alt="Logo" />
                 </Link>
 
@@ -48,10 +79,25 @@ const Header = () => {
 
                 {/* Right section */}
                 <div ref={menuRef} className="flex items-center gap-4">
-                    {/* Login & Register (visible on large screens) */}
+                    {/* User Authentication Section */}
                     <div className="hidden xl:flex text-white gap-4">
-                        <button className="hover:text-accent transition-all text-base uppercase font-medium">Login</button>
-                        <button className="hover:text-accent transition-all text-base uppercase font-medium">Register</button>
+                        {user ? (
+                            <div className="hidden xl:flex text-white gap-4 items-center">
+                                <span className="text-sm">{user.email}</span>
+                                <button onClick={handleLogout} className="text-red-500 hover:text-red-400 transition-all">
+                                    Logout
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="hidden xl:flex text-white gap-6">  {/* Increased gap from 4 to 6 */}
+                                <Link href="/auth/login" className="hover:text-accent transition-all text-base uppercase font-medium">
+                                    Login
+                                </Link>
+                                <Link href="/auth/signup" className="hover:text-accent transition-all text-base uppercase font-medium">
+                                    Register
+                                </Link>
+                            </div>
+                        )}
                     </div>
 
                     {/* Mobile Nav */}
