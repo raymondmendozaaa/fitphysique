@@ -30,29 +30,30 @@ export default function GuestPassPage() {
       setError("Please enter an email and select a location.");
       return;
     }
-
+  
     setLoading(true);
     setError("");
-
-    // Send request to API route for Stripe checkout session
+  
     const res = await fetch("/api/guest-pass", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, location_id: selectedLocation }),
     });
-
+  
     const { sessionId, error } = await res.json();
     setLoading(false);
-
+  
     if (error) {
       setError(error);
       return;
     }
-
+  
     // Redirect to Stripe checkout
     const stripe = await stripePromise;
     await stripe.redirectToCheckout({ sessionId });
+  
   };
+  
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gray-900 text-white">
