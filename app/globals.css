@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  @font-face {
+    font-family: 'Roboto';
+    src: url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
+  }
+
+  @font-face {
+    font-family: 'Oswald';
+    src: url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;700&display=swap');
+  }
+
+  body {
+    @apply font-roboto;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-oswald font-bold uppercase;
+  }
+
+  .h1 {
+    @apply text-white text-7xl lg:text-[128px] tracking-[-3px];
+  }
+
+  .h2 {
+    @apply text-[36px];
+  }
+
+  .h3 {
+    @apply text-[32px];
+  }
+
+  .h4 {
+    @apply text-[26px];
+  }
+
+  .h5 {
+    @apply text-[22px];
+  }
+}
+
+.active {
+  @apply text-accent;
+}
+
+/* swiper pagination styles */
+.swiper-horizontal > .swiper-pagination-bullets .swiper-pagination-bullet,
+.swiper-horizontal.swiper-pagination-bullets .swiper-pagination-bullet {
+  @apply bg-accent;
+}
