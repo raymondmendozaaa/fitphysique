@@ -4,32 +4,23 @@ import withAuth from "@/lib/withAuth";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
-<<<<<<< HEAD
 import { fetchStripeSubscription } from "@/lib/helpers/fetchStripeSubscription"; // ✅ added this
-=======
->>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
 
 const MemberDashboard = ({ user, role, membership }) => {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [hasActiveContract, setHasActiveContract] = useState(false);
   const [membershipExpiresOn, setMembershipExpiresOn] = useState("N/A");
-<<<<<<< HEAD
   const [currentPlan, setCurrentPlan] = useState("None");
   const [isExpired, setIsExpired] = useState(false);
 
   // ✅ First: Fetch membership details (Supabase)
-=======
-  const [currentPlan, setCurrentPlan] = useState(membership);
-
->>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
   useEffect(() => {
     const fetchMembershipDetails = async () => {
       if (!user) return;
 
       const { data: membershipData, error } = await supabase
         .from("memberships")
-<<<<<<< HEAD
         .select(`
           status,
           expires_at,
@@ -38,9 +29,6 @@ const MemberDashboard = ({ user, role, membership }) => {
             requires_contract
           )
         `)
-=======
-        .select("plan, has_active_contract, next_bill_date, contract_end_date")
->>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
         .eq("user_id", user.id)
         .single();
 
@@ -49,7 +37,6 @@ const MemberDashboard = ({ user, role, membership }) => {
         return;
       }
 
-<<<<<<< HEAD
       const planName = membershipData?.plan_durations?.plan_name || "None";
       const hasContract = !!membershipData?.plan_durations?.requires_contract;
 
@@ -86,26 +73,11 @@ const MemberDashboard = ({ user, role, membership }) => {
 
       setMembershipExpiresOn(expirationDate);
       setIsExpired(expired);
-=======
-      setHasActiveContract(membershipData.has_active_contract);
-      setCurrentPlan(membershipData.plan);
-
-      // ✅ Determine Expiration Date
-      let expirationDate = "N/A";
-      if (membershipData.has_active_contract && membershipData.contract_end_date) {
-        expirationDate = new Date(membershipData.contract_end_date).toLocaleDateString();
-      } else if (!membershipData.has_active_contract && membershipData.next_bill_date) {
-        expirationDate = new Date(membershipData.next_bill_date).toLocaleDateString();
-      }
-
-      setMembershipExpiresOn(expirationDate);
->>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
     };
 
     fetchMembershipDetails();
   }, [user]);
 
-<<<<<<< HEAD
   // ✅ Second: Try to overwrite with real Stripe next payment (optional)
   useEffect(() => {
     const fetchNextPaymentDate = async () => {
@@ -134,8 +106,6 @@ const MemberDashboard = ({ user, role, membership }) => {
     }
   }, [isExpired]);
 
-=======
->>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
   const handleCancelMembership = async () => {
     if (hasActiveContract) {
       alert("You cannot cancel your membership while under contract. Please contact an admin.");
@@ -166,7 +136,6 @@ const MemberDashboard = ({ user, role, membership }) => {
       <h1 className="text-3xl font-bold">Welcome to Your Dashboard</h1>
       <p className="mt-4">Logged in as: <span className="font-semibold">{user?.email}</span></p>
       <p>Role: <span className="font-semibold">{role}</span></p>
-<<<<<<< HEAD
       <p className="mt-2">
         Membership Level:{" "}
         <span className="font-semibold text-accent">
@@ -220,46 +189,6 @@ const MemberDashboard = ({ user, role, membership }) => {
         )
       )}
 
-=======
-      <p className="mt-2">Membership Level: <span className="font-semibold text-accent">{currentPlan || "None"}</span></p>
-
-      {/* Active Contract Status */}
-      <p className="mt-2">
-        <strong>Active Contract:</strong> 
-        <span className={`font-semibold ${hasActiveContract ? "text-green-500" : "text-red-500"}`}>
-          {hasActiveContract ? "Yes" : "No"}
-        </span>
-      </p>
-
-      {/* Membership Expiration Date */}
-      <p className="mt-2">
-        <strong>Membership Expires On:</strong> 
-        <span className="font-semibold text-accent">{membershipExpiresOn}</span>
-      </p>
-
-      {/* Change Membership Button (Disabled for Contracts) */}
-      {!hasActiveContract && (
-        <button
-          className="mt-8 px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded"
-          onClick={() => router.push("/membership/change")}
-        >
-          Change Membership
-        </button>
-      )}
-
-      {/* Cancel Membership Button (Disabled for Contracts) */}
-      {!hasActiveContract && (
-        <button
-          className="mt-4 px-6 py-2 bg-red-600 hover:bg-red-700 rounded"
-          onClick={handleCancelMembership}
-          disabled={loading}
-        >
-          {loading ? "Processing..." : "Cancel Membership"}
-        </button>
-      )}
-
-      {/* Logout Button */}
->>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
       <button
         className="mt-4 px-6 py-2 bg-gray-700 hover:bg-gray-800 rounded"
         onClick={async () => {

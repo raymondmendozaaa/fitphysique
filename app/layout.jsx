@@ -3,10 +3,7 @@ import "./globals.css";
 // Components
 import Header from "@/components/Header.jsx";
 import Footer from "@/components/Footer.jsx";
-<<<<<<< HEAD
 import { Toaster } from "react-hot-toast";
-=======
->>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
 
 const oswald = Oswald({
   variable: "--font-oswald",
@@ -31,10 +28,7 @@ export default function RootLayout({ children }) {
       <body
         className={`${oswald.variable} ${roboto.variable} w-full max-w-[1920px] mx-auto bg-white`}
       >
-<<<<<<< HEAD
         <Toaster position="top-center" />
-=======
->>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
         <Header />
         {children}
         <Footer />
