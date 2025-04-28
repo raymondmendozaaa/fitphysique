@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+<<<<<<< HEAD
 import Link from "next/link";
 import useLogin from "@/lib/hooks/useLogin";
 
@@ -18,14 +19,46 @@ export default function LoginPage() {
   const onSubmit = (e) => {
     e.preventDefault();
     handleLogin(email, password);
+=======
+import { supabase } from "@/lib/supabaseClient";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+
+export default function LoginPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+
+    setLoading(false);
+
+    if (error) {
+      setError(error.message);
+    } else {
+      router.push("/dashboard");
+    }
+>>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white">
       <div className="p-8 bg-gray-800 shadow-lg rounded-lg w-full max-w-md">
         <h1 className="text-2xl font-bold text-center mb-6">LOGIN</h1>
+<<<<<<< HEAD
 
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
+=======
+        {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
+        <form onSubmit={handleLogin} className="flex flex-col gap-4">
+>>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
           <input
             type="email"
             placeholder="Email"
@@ -50,6 +83,7 @@ export default function LoginPage() {
             {loading ? "Logging in..." : "Login"}
           </button>
         </form>
+<<<<<<< HEAD
 
         {/* 🔹 Resend Confirmation Email Section */}
         <div className="mt-4 text-center">
@@ -63,6 +97,8 @@ export default function LoginPage() {
           </button>
         </div>
 
+=======
+>>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
         <p className="mt-4 text-sm text-center">
           Don't have an account?{" "}
           <Link href="/auth/signup" className="text-blue-500 hover:underline">

@@ -2,15 +2,26 @@
 
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabaseClient";
+<<<<<<< HEAD
+=======
+import { useRouter } from "next/navigation";
+>>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
 import { loadStripe } from "@stripe/stripe-js";
 
 const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLIC_KEY);
 
 export default function GuestPassPage() {
+<<<<<<< HEAD
   const [email, setEmail] = useState("");
   const [locations, setLocations] = useState([]);
   const [selectedLocation, setSelectedLocation] = useState("");
   const [quantity, setQuantity] = useState(1);
+=======
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [locations, setLocations] = useState([]);
+  const [selectedLocation, setSelectedLocation] = useState("");
+>>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -29,6 +40,7 @@ export default function GuestPassPage() {
       setError("Please enter an email and select a location.");
       return;
     }
+<<<<<<< HEAD
 
     setLoading(true);
     setError("");
@@ -43,15 +55,40 @@ export default function GuestPassPage() {
     const { sessionId, error } = await res.json();
     setLoading(false);
 
+=======
+  
+    setLoading(true);
+    setError("");
+  
+    const res = await fetch("/api/guest-pass", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, location_id: selectedLocation }),
+    });
+  
+    const { sessionId, error } = await res.json();
+    setLoading(false);
+  
+>>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
     if (error) {
       setError(error);
       return;
     }
+<<<<<<< HEAD
 
     // Redirect to Stripe checkout
     const stripe = await stripePromise;
     await stripe.redirectToCheckout({ sessionId });
   };
+=======
+  
+    // Redirect to Stripe checkout
+    const stripe = await stripePromise;
+    await stripe.redirectToCheckout({ sessionId });
+  
+  };
+  
+>>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gray-900 text-white">
@@ -80,6 +117,7 @@ export default function GuestPassPage() {
           ))}
         </select>
 
+<<<<<<< HEAD
         {/* Guest Pass Quantity Selector */}
         <select
           value={quantity}
@@ -93,6 +131,8 @@ export default function GuestPassPage() {
           ))}
         </select>
 
+=======
+>>>>>>> a13871cbcb0587d21345b91f28863c3e4151a8e6
         <button
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded"
           onClick={handlePurchase}
