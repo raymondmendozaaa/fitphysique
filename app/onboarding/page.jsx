@@ -28,7 +28,14 @@ export default function OnboardingPage() {
   const [selectedPlan, setSelectedPlan] = useState("");
   const [selectedDurationId, setSelectedDurationId] = useState("");
   const [selectedDuration, setSelectedDuration] = useState(null);
+  const [isPaidInFull, setIsPaidInFull] = useState(false);
+  const [autoRenewal, setAutoRenewal] = useState(false);
+  const [renewAtDiscountedRate, setRenewAtDiscountedRate] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  const isGuestPass =
+    selectedDuration?.plan_name === "Guest-Pass" ||
+    selectedDuration?.plan_name?.startsWith("Guest Pass");
 
   useEffect(() => {
     const fetchDurations = async () => {
@@ -46,6 +53,15 @@ export default function OnboardingPage() {
     fetchDurations();
   }, []);
 
+  useEffect(() => {
+    if (selectedPlan && selectedDurationId && plansWithDurations[selectedPlan]) {
+      const match = plansWithDurations[selectedPlan].find(
+        (d) => d.id === selectedDurationId
+      );
+      if (match) setSelectedDuration(match);
+    }
+  }, [plansWithDurations, selectedPlan, selectedDurationId]);
+  
   useEffect(() => {
     if (!user) return;
 
@@ -85,6 +101,7 @@ export default function OnboardingPage() {
     setImagePreview(URL.createObjectURL(file));
   };
 
+  // ✅ Detect Paid-in-Full directly using the duration_label
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!user) return;
@@ -96,6 +113,7 @@ export default function OnboardingPage() {
     });
 
     if (!isValid) return;
+
     setLoading(true);
     const toastId = showLoading("Submitting...");
 
@@ -114,27 +132,22 @@ export default function OnboardingPage() {
         planDurationId: selectedDuration.id,
       });
 
-      if (selectedDuration.plan_name === "Guest Pass" && selectedDuration.is_promotional) {
-        showSuccess("Promotional Guest Pass activated!", toastId);
-        router.push("/dashboard");
-        return;
-      }
-
+      // ✅ Redirect to contract signing if required
       if (selectedDuration.requires_contract) {
-        showSuccess("Redirecting to contract...", toastId);
-        router.push(`/contract?user_id=${user.id}&plan_duration_id=${selectedDuration.id}`);
+        router.push(
+          `/contract?user_id=${user.id}&plan_duration_id=${selectedDuration.id}&paid_in_full=${isPaidInFull}&auto_renewal_enabled=${autoRenewal}&renew_at_discounted_rate=${renewAtDiscountedRate}`
+        );
         return;
       }
 
-      const planKey = selectedDuration.plan_name.toUpperCase().replace(/\s/g, "_");
-      const durationKey = selectedDuration.duration_label.toUpperCase().replace(/\s/g, "");
-
+      // Proceed to Stripe Checkout only if no contract is required
       const url = await createStripeSession({
         userId: user.id,
         planDurationId: selectedDuration.id,
-        planKey,
-        durationKey,
         requiresContract: selectedDuration.requires_contract || false,
+        paidInFull: isPaidInFull,
+        autoRenewalEnabled: autoRenewal,
+        renewAtDiscountedRate: renewAtDiscountedRate,
       });
 
       showSuccess("Redirecting to payment...", toastId);
@@ -194,10 +207,11 @@ export default function OnboardingPage() {
             ))}
           </select>
         </div>
-
-        {selectedPlan && selectedPlan !== "Guest Pass" && (
+        {selectedPlan && (
           <div>
-            <label className="block text-sm font-medium mb-1">Duration</label>
+            <label className="block text-sm font-medium mb-1">
+              {selectedPlan === "Guest Pass" ? "Guest Pass Length" : "Duration"}
+            </label>
             <select
               value={selectedDurationId}
               onChange={(e) => {
@@ -206,6 +220,18 @@ export default function OnboardingPage() {
                 );
                 setSelectedDurationId(e.target.value);
                 setSelectedDuration(selected);
+              
+                // ✅ Debugging Console Logs
+                console.log("🔍 Selected Duration:", selected);
+                console.log(
+                  "🔍 Is Paid in Full (Calculated):",
+                  selected?.duration_label.toLowerCase().includes("paid in full")
+                );
+              
+                setIsPaidInFull(
+                  selected?.duration_label.toLowerCase().includes("paid in full")
+                );
+              
                 if (selected?.requires_contract) {
                   showSuccess("Note: This duration requires a contract.");
                 }
@@ -220,6 +246,45 @@ export default function OnboardingPage() {
                 </option>
               ))}
             </select>
+            
+            {/* Auto-Renewal and Discounted Rate Options */}
+            {selectedDuration && !isGuestPass && !selectedDuration.is_promotional && (
+              <div className="mt-4">
+                <label className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    checked={autoRenewal}
+                    onChange={(e) => setAutoRenewal(e.target.checked)}
+                    className="form-checkbox text-yellow-500"
+                  />
+                  <span>Enable Auto-Renewal</span>
+                </label>
+              </div>
+            )}
+
+            {/* Discounted Rate for Paid-in-Full Contracts */}
+            {console.log("🔍 Toggle Condition:", {
+              isPaidInFull,
+              requiresContract: selectedDuration?.requires_contract,
+            })}
+            {!isGuestPass && selectedDuration?.requires_contract && isPaidInFull && (
+              <div className="mt-4">
+                <label className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    checked={renewAtDiscountedRate}
+                    onChange={(e) => {
+                      if (autoRenewal) {
+                        setRenewAtDiscountedRate(e.target.checked);
+                      }
+                    }}
+                    disabled={!autoRenewal}
+                    className={`form-checkbox text-yellow-500 ${!autoRenewal ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  />
+                  <span>Renew at Discounted Rate (Paid-in-Full Contracts Only)</span>
+                </label>
+              </div>
+            )}
           </div>
         )}
 

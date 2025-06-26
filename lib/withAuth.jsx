@@ -17,7 +17,7 @@ const withAuth = (WrappedComponent, requiredRole) => {
         setLoading(true);
 
         const {
-          data: { user },
+          data: { user }
         } = await supabase.auth.getUser();
 
         if (!user) {
@@ -41,32 +41,42 @@ const withAuth = (WrappedComponent, requiredRole) => {
         const { role, onboarded, profile_url } = userData;
         setRole(role);
 
-        const { data: membershipData } = await supabase
+        const { data: membershipData, error: membershipError } = await supabase
           .from("memberships")
           .select("plan_duration_id")
           .eq("user_id", user.id)
           .maybeSingle();
 
-        const hasMembership = membershipData && membershipData.plan_duration_id;
+        if (membershipError) {
+          console.error("Error fetching membership:", membershipError.message);
+        }
 
-        const needsOnboarding =
-          role === "member" &&
-          (!onboarded || !profile_url || !hasMembership);
+        const hasMembership = membershipData?.plan_duration_id != null;
+
+        // ✅ Debug Logging
+        console.log("🔍 Auth Check:", {
+          onboarded,
+          profile_url,
+          hasMembership,
+          role,
+        });
 
         const isOnboardingPage =
           typeof window !== "undefined" &&
           window.location.pathname.startsWith("/onboarding");
 
+        const needsOnboarding =
+          role === "member" &&
+          (!onboarded || !profile_url);
+
         if (needsOnboarding && !isOnboardingPage) {
-          console.log("⏳ Waiting briefly for webhook...");
+          console.log("⏳ Redirecting to onboarding (webhook might still be processing)");
           setTimeout(() => {
             router.push("/onboarding");
-          }, 1500); // 1.5s delay to give webhook time to update
+          }, 1500);
           return;
         }
-          
 
-        // Role-based route protection
         if (requiredRole && role !== requiredRole) {
           router.push(role === "admin" ? "/admin" : "/dashboard");
           return;
@@ -77,7 +87,6 @@ const withAuth = (WrappedComponent, requiredRole) => {
           return;
         }
 
-        // Store membership plan name if available
         if (membershipData?.plan) {
           setMembership(membershipData.plan);
         }
@@ -97,7 +106,7 @@ const withAuth = (WrappedComponent, requiredRole) => {
           </div>
         </div>
       );
-    }    
+    }
 
     return <WrappedComponent user={user} role={role} membership={membership} />;
   };
