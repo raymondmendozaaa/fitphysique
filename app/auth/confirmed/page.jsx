@@ -7,7 +7,7 @@ export default function ConfirmedPage() {
 
   useEffect(() => {
     setTimeout(() => {
-      router.push("/dashboard"); // Redirect after 3 seconds
+      router.push("/member"); // Redirect after 3 seconds
     }, 3000);
   }, []);
 

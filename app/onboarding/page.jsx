@@ -2,15 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
-
 import { supabase } from "@/lib/supabaseClient";
 import useCurrentUser from "@/lib/hooks/useCurrentUser";
 import uploadProfileImage from "@/lib/helpers/uploadProfileImage";
-import updateUserAndMembership from "@/lib/helpers/updateUserAndMembership";
-import { groupPlanDurationsByName } from "@/lib/utils/planGrouping";
-import { createStripeSession } from "@/lib/utils/stripeSession";
-import { validateOnboardingForm } from "@/lib/utils/validateOnboardingForm";
+import markOnboarded from "@/lib/helpers/markOnboarded";
 import {
   showError,
   showSuccess,
@@ -20,164 +15,268 @@ import {
 
 export default function OnboardingPage() {
   const router = useRouter();
-  const supabaseClient = createClientComponentClient();
   const { user } = useCurrentUser();
+
   const [profileImage, setProfileImage] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
-  const [plansWithDurations, setPlansWithDurations] = useState({});
-  const [selectedPlan, setSelectedPlan] = useState("");
-  const [selectedDurationId, setSelectedDurationId] = useState("");
-  const [selectedDuration, setSelectedDuration] = useState(null);
-  const [isPaidInFull, setIsPaidInFull] = useState(false);
-  const [autoRenewal, setAutoRenewal] = useState(false);
-  const [renewAtDiscountedRate, setRenewAtDiscountedRate] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [phone, setPhone] = useState("");
 
-  const isGuestPass =
-    selectedDuration?.plan_name === "Guest-Pass" ||
-    selectedDuration?.plan_name?.startsWith("Guest Pass");
+  const [needsPhoto, setNeedsPhoto] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchDurations = async () => {
-      const { data, error } = await supabase
-        .from("plan_durations")
-        .select("id, plan_name, duration_label, requires_contract, is_promotional");
+  // 🔍 Helper: does this user have any entitlement (membership or unexpired guest pass)?
+  async function checkEntitlement(userId) {
+    const nowIso = new Date().toISOString();
 
-      if (error) {
-        showError("Failed to load plan durations");
-      } else {
-        setPlansWithDurations(groupPlanDurationsByName(data));
-      }
+    const [msQry, gpQry] = await Promise.all([
+      supabase
+        .from("memberships")
+        .select("id,status,start_date,expires_at", { count: "exact" })
+        .eq("user_id", userId)
+        .order("start_date", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from("guest_passes")
+        .select("id,expires_at,status", { count: "exact" })
+        .eq("user_id", userId)
+        .gte("expires_at", nowIso)
+        .order("expires_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+
+    const membership = msQry.data ?? null;
+    const membershipErr = msQry.error ?? null;
+    const guestPass = gpQry.data ?? null;
+    const guestPassErr = gpQry.error ?? null;
+
+    const hasMembership = !!membership;
+    const hasGuestPass = !!guestPass;
+
+    const result = {
+      ok: (hasMembership || hasGuestPass) && !membershipErr && !guestPassErr,
+      hasMembership,
+      hasGuestPass,
+      membership,
+      guestPass,
+      membershipErr,
+      guestPassErr,
+      nowIso,
     };
 
-    fetchDurations();
-  }, []);
+    console.log("[Onboarding] checkEntitlement result:", result);
+    return result;
+  }
 
+  // 🔁 Main loader: membership, user profile, entitlement
   useEffect(() => {
-    if (selectedPlan && selectedDurationId && plansWithDurations[selectedPlan]) {
-      const match = plansWithDurations[selectedPlan].find(
-        (d) => d.id === selectedDurationId
-      );
-      if (match) setSelectedDuration(match);
-    }
-  }, [plansWithDurations, selectedPlan, selectedDurationId]);
-  
-  useEffect(() => {
-    if (!user) return;
+    if (!user?.id) return;
 
-    const userChannel = supabaseClient
-      .channel(`onboarding-user-${user.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'users',
-          filter: `id=eq.${user.id}`,
-        },
-        (payload) => {
-          const newOnboarded = payload.new.onboarded;
-          if (newOnboarded) {
-            console.log("🎉 Realtime onboarded = true");
-            router.push("/dashboard");
-          }
-        }
-      )
-      .subscribe();
+    (async () => {
+      setLoading(true);
 
-    return () => {
-      supabaseClient.removeChannel(userChannel);
-    };
-  }, [user, supabaseClient, router]);
+      console.log("[Onboarding] useCurrentUser:", {
+        id: user.id,
+        email: user.email,
+      });
 
-  const handleImageChange = (e) => {
-    const file = e.target.files[0];
-    if (!file || !file.type.startsWith("image/")) {
-      showError("Only image files are allowed.");
-      return;
-    }
+      // 1) latest membership (no embedded join)
+      const { data: membershipRow, error: mErr } = await supabase
+        .from("memberships")
+        .select(
+          `
+          id,
+          status,
+          plan_durations (
+            id,
+            plan_name,
+            duration_label,
+            is_promotional
+          )
+        `
+        )
+        .eq("user_id", user.id)
+        .order("start_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-    setProfileImage(file);
-    setImagePreview(URL.createObjectURL(file));
-  };
-
-  // ✅ Detect Paid-in-Full directly using the duration_label
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!user) return;
-
-    const isValid = validateOnboardingForm({
-      profileImage,
-      selectedPlan,
-      selectedDurationId,
-    });
-
-    if (!isValid) return;
-
-    setLoading(true);
-    const toastId = showLoading("Submitting...");
-
-    try {
-      const profileUrl = await uploadProfileImage(profileImage, user.id);
-
-      if (!selectedDuration) {
-        showError("Invalid plan selected.", toastId);
+      if (mErr) {
+        console.error(mErr);
+        showError("Failed to load your membership.");
         setLoading(false);
         return;
       }
 
-      await updateUserAndMembership({
-        userId: user.id,
-        profileUrl,
-        planDurationId: selectedDuration.id,
-      });
+      // 2) user profile_url (separate, simple query)
+      const { data: userRow, error: uErr } = await supabase
+        .from("users")
+        .select("id, profile_url, phone")
+        .eq("id", user.id)
+        .maybeSingle();
 
-      // ✅ Redirect to contract signing if required
-      if (selectedDuration.requires_contract) {
-        router.push(
-          `/contract?user_id=${user.id}&plan_duration_id=${selectedDuration.id}&paid_in_full=${isPaidInFull}&auto_renewal_enabled=${autoRenewal}&renew_at_discounted_rate=${renewAtDiscountedRate}`
-        );
+      if (uErr) {
+        console.error(uErr);
+        showError("Failed to load your account.");
+        setLoading(false);
         return;
       }
 
-      // Proceed to Stripe Checkout only if no contract is required
-      const url = await createStripeSession({
-        userId: user.id,
-        planDurationId: selectedDuration.id,
-        requiresContract: selectedDuration.requires_contract || false,
-        paidInFull: isPaidInFull,
-        autoRenewalEnabled: autoRenewal,
-        renewAtDiscountedRate: renewAtDiscountedRate,
-      });
+      const planName = membershipRow?.plan_durations?.plan_name || "";
+      const isGuestPass =
+        planName === "Guest-Pass" || planName.startsWith("Guest Pass");
+      const hasPhoto = !!userRow?.profile_url;
 
-      showSuccess("Redirecting to payment...", toastId);
-      window.location.href = url;
-    } catch (err) {
-      console.error("Onboarding Error:", err);
-      showError(err.message || "Something went wrong.", toastId);
+      // photo required for members; optional for guest pass
+      setNeedsPhoto(!isGuestPass && !hasPhoto);
+
+      // Prefill phone (optional)
+      setPhone(userRow?.phone || "");
+
+      // 3) Check entitlement (membership or guest pass)
+      const entitled = await checkEntitlement(user.id);
+      console.log("[Onboarding] entitlement (auto-complete check):", entitled);
+
+      // If they have entitlement AND either:
+      //  - they're guest pass, or
+      //  - they already have a photo,
+      // then we can skip showing the form and finish onboarding.
+      if (
+        (entitled.hasMembership || entitled.hasGuestPass) &&
+        (isGuestPass || hasPhoto)
+      ) {
+        await markOnboarded(user.id);
+        router.replace("/member");
+        return;
+      }
+
       setLoading(false);
-    } finally {
+    })();
+  }, [user, router]);
+
+  const handleImageChange = (e) => {
+    const f = e.target.files?.[0];
+    if (!f || !f.type?.startsWith("image/")) {
+      showError("Only image files are allowed.");
+      return;
+    }
+    setProfileImage(f);
+    setImagePreview(URL.createObjectURL(f));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!user?.id) return;
+
+    if (needsPhoto && !profileImage) {
+      showError("Please upload a profile picture to continue.");
+      return;
+    }
+
+    setLoading(true);
+    const toastId = showLoading("Saving...");
+
+    try {
+      if (profileImage) {
+        const profileUrl = await uploadProfileImage(profileImage, user.id);
+        await supabase
+          .from("users")
+          .update({ profile_url: profileUrl })
+          .eq("id", user.id);
+      }
+
+      // Save phone if provided (optional)
+      if (phone && phone.trim()) {
+        await supabase
+          .from("users")
+          .update({ phone: phone.trim() })
+          .eq("id", user.id);
+      }
+
+      const info = await checkEntitlement(user.id);
+
+      if (!info.hasMembership && !info.hasGuestPass) {
+        console.group("[Onboarding] Entitlement check failed on submit");
+        console.log("now", info.nowIso);
+        console.log("membership", info.membership);
+        console.log("guestPass", info.guestPass);
+        console.log("membershipErr", info.membershipErr);
+        console.log("guestPassErr", info.guestPassErr);
+        console.groupEnd();
+
+        let reason =
+          "We're still finalizing your membership—please try again shortly.";
+        if (info.membershipErr || info.guestPassErr) {
+          reason =
+            "We couldn’t check your account (temporary error). Please try again.";
+        } else {
+          reason =
+            "No active membership or guest pass found. If you just created one, wait a moment and retry.";
+        }
+
+        dismissToast(toastId);
+        showError(reason);
+        setLoading(false);
+        return;
+      }
+
+      await markOnboarded(user.id);
+
       dismissToast(toastId);
+      showSuccess("All set—welcome!");
+      router.replace("/member");
+    } catch (err) {
+      console.error(err);
+      dismissToast(toastId);
+      showError(err.message || "Failed to complete onboarding.");
+      setLoading(false);
     }
   };
 
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center px-4 py-16">
+        <div className="text-gray-300">Checking your account…</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center px-4 py-16">
+    <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center px-4 py-16 relative">
+      {/* 🔍 Tiny visible debug overlay – remove when you're done debugging */}
+      <div className="absolute top-2 left-2 text-[11px] bg-black/80 text-gray-200 border border-gray-700 rounded px-2 py-1 max-w-xs break-words">
+        <div className="font-semibold">DEBUG (Onboarding)</div>
+        <div>ID: {user?.id || "none"}</div>
+        <div>Email: {user?.email || "none"}</div>
+      </div>
+
       <form
         onSubmit={handleSubmit}
         className="w-full max-w-lg bg-gray-900 p-8 rounded-2xl shadow-xl space-y-6"
       >
-        <h2 className="text-3xl font-bold text-center mb-4">Complete Your Profile</h2>
+        <h2 className="text-3xl font-bold text-center mb-2">
+          Finish Setting Up
+        </h2>
+        <p className="text-center text-gray-400 mb-4">
+          We just need a profile picture and you’re done.
+        </p>
 
         <div>
-          <label className="block text-sm font-medium mb-1">Profile Picture</label>
+          <label className="block text-sm font-medium mb-1">
+            Profile Picture
+          </label>
           <input
             type="file"
             accept="image/*"
             onChange={handleImageChange}
             className="w-full bg-gray-800 p-2 rounded border border-gray-700"
-            required
+            required={needsPhoto}
           />
+          {needsPhoto ? (
+            <p className="text-sm text-red-500 mt-1">*Required for members.</p>
+          ) : (
+            <p className="text-sm text-gray-400 mt-1">Optional.</p>
+          )}
           {imagePreview && (
             <img
               src={imagePreview}
@@ -188,112 +287,28 @@ export default function OnboardingPage() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">Membership Plan</label>
-          <select
-            value={selectedPlan}
-            onChange={(e) => {
-              setSelectedPlan(e.target.value);
-              setSelectedDurationId("");
-              setSelectedDuration(null);
-            }}
-            required
+          <label className="block text-sm font-medium mb-1">
+            Phone (optional)
+          </label>
+          <input
+            type="tel"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
             className="w-full bg-gray-800 p-3 rounded border border-gray-700"
-          >
-            <option value="">Select a Plan</option>
-            {Object.keys(plansWithDurations).map((plan) => (
-              <option key={plan} value={plan}>
-                {plan}
-              </option>
-            ))}
-          </select>
+            placeholder="Enter your phone number here"
+          />
+          <p className="text-sm text-gray-400 mt-1">
+            Used for account/help if there’s an issue checking in. We won’t
+            spam you.
+          </p>
         </div>
-        {selectedPlan && (
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              {selectedPlan === "Guest Pass" ? "Guest Pass Length" : "Duration"}
-            </label>
-            <select
-              value={selectedDurationId}
-              onChange={(e) => {
-                const selected = plansWithDurations[selectedPlan].find(
-                  (p) => p.id === e.target.value
-                );
-                setSelectedDurationId(e.target.value);
-                setSelectedDuration(selected);
-              
-                // ✅ Debugging Console Logs
-                console.log("🔍 Selected Duration:", selected);
-                console.log(
-                  "🔍 Is Paid in Full (Calculated):",
-                  selected?.duration_label.toLowerCase().includes("paid in full")
-                );
-              
-                setIsPaidInFull(
-                  selected?.duration_label.toLowerCase().includes("paid in full")
-                );
-              
-                if (selected?.requires_contract) {
-                  showSuccess("Note: This duration requires a contract.");
-                }
-              }}
-              required
-              className="w-full bg-gray-800 p-3 rounded border border-gray-700"
-            >
-              <option value="">Select Duration</option>
-              {plansWithDurations[selectedPlan]?.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.duration_label}
-                </option>
-              ))}
-            </select>
-            
-            {/* Auto-Renewal and Discounted Rate Options */}
-            {selectedDuration && !isGuestPass && !selectedDuration.is_promotional && (
-              <div className="mt-4">
-                <label className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    checked={autoRenewal}
-                    onChange={(e) => setAutoRenewal(e.target.checked)}
-                    className="form-checkbox text-yellow-500"
-                  />
-                  <span>Enable Auto-Renewal</span>
-                </label>
-              </div>
-            )}
-
-            {/* Discounted Rate for Paid-in-Full Contracts */}
-            {console.log("🔍 Toggle Condition:", {
-              isPaidInFull,
-              requiresContract: selectedDuration?.requires_contract,
-            })}
-            {!isGuestPass && selectedDuration?.requires_contract && isPaidInFull && (
-              <div className="mt-4">
-                <label className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    checked={renewAtDiscountedRate}
-                    onChange={(e) => {
-                      if (autoRenewal) {
-                        setRenewAtDiscountedRate(e.target.checked);
-                      }
-                    }}
-                    disabled={!autoRenewal}
-                    className={`form-checkbox text-yellow-500 ${!autoRenewal ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  />
-                  <span>Renew at Discounted Rate (Paid-in-Full Contracts Only)</span>
-                </label>
-              </div>
-            )}
-          </div>
-        )}
 
         <button
           type="submit"
           disabled={loading}
-          className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold rounded-xl"
+          className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold rounded-xl disabled:opacity-50"
         >
-          {loading ? "Submitting..." : "Finish Onboarding"}
+          {loading ? "Saving..." : "Finish"}
         </button>
       </form>
     </div>

@@ -1,10 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import useLogin from "@/lib/hooks/useLogin";
 
 export default function LoginPage() {
+  const searchParams = useSearchParams();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
@@ -14,6 +17,14 @@ export default function LoginPage() {
     handleLogin,
     handleResendConfirmation,
   } = useLogin();
+
+  // 🔹 On mount, prefill email from ?email= query param if present
+  useEffect(() => {
+    const qpEmail = searchParams.get("email");
+    if (qpEmail) {
+      setEmail(qpEmail);
+    }
+  }, [searchParams]);
 
   const onSubmit = (e) => {
     e.preventDefault();

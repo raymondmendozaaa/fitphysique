@@ -59,14 +59,14 @@ const MobileNav = ({ containerStyles, setOpenNav }) => {
             {/* Login & Register (Styled Differently) */}
             <div className="flex flex-col gap-4 text-center">
                 <Link 
-                    href="/login" 
+                    href="/auth/login" 
                     className="text-white hover:text-accent transition-all" 
                     onClick={() => setOpenNav(false)}
                 >
                     Login
                 </Link>
                 <Link 
-                    href="/register" 
+                    href="/auth/register" 
                     className=" text-white rounded-md hover:text-accent transition-all" 
                     onClick={() => setOpenNav(false)}
                 >

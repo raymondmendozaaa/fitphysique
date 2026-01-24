@@ -4,7 +4,12 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import withAuth from "@/lib/withAuth";
 import { createStripeSession } from "@/lib/utils/stripeSession";
-import { showError, showSuccess, showLoading, dismissToast } from "@/lib/utils/toastUtils";
+import {
+  showError,
+  showSuccess,
+  showLoading,
+  dismissToast,
+} from "@/lib/utils/toastUtils";
 import { supabase } from "@/lib/supabaseClient";
 import { groupPlanDurationsByName } from "@/lib/utils/planGrouping";
 
@@ -16,6 +21,10 @@ const MembershipChange = ({ user }) => {
   const [loading, setLoading] = useState(false);
   const [plansWithDurations, setPlansWithDurations] = useState({});
 
+  // 🔹 New: preferred location for metadata
+  const [preferredLocationId, setPreferredLocationId] = useState(null);
+
+  // Load plan durations
   useEffect(() => {
     const fetchDurations = async () => {
       const { data, error } = await supabase
@@ -23,6 +32,7 @@ const MembershipChange = ({ user }) => {
         .select("id, plan_name, duration_label, requires_contract");
 
       if (error) {
+        console.error("[MembershipChange] Failed to load durations:", error);
         showError("Failed to load plan durations");
       } else {
         setPlansWithDurations(groupPlanDurationsByName(data));
@@ -31,6 +41,28 @@ const MembershipChange = ({ user }) => {
 
     fetchDurations();
   }, []);
+
+  // 🔹 Load user preferred_location_id
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const fetchUserPrefs = async () => {
+      const { data, error } = await supabase
+        .from("users")
+        .select("preferred_location_id")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error("[MembershipChange] Failed to load user prefs:", error);
+        return;
+      }
+
+      setPreferredLocationId(data?.preferred_location_id || null);
+    };
+
+    fetchUserPrefs();
+  }, [user]);
 
   const handlePlanChange = (plan) => {
     setSelectedPlan(plan);
@@ -61,12 +93,18 @@ const MembershipChange = ({ user }) => {
     try {
       if (selectedDuration.requires_contract) {
         showSuccess("Redirecting to contract...", toastId);
-        router.push(`/contract?user_id=${user.id}&plan_duration_id=${selectedDuration.id}`);
+        router.push(
+          `/contract?user_id=${user.id}&plan_duration_id=${selectedDuration.id}`
+        );
         return;
       }
 
-      const planKey = selectedDuration.plan_name.toUpperCase().replace(/\s/g, "_");
-      const durationKey = selectedDuration.duration_label.toUpperCase().replace(/\s/g, "");
+      const planKey = selectedDuration.plan_name
+        .toUpperCase()
+        .replace(/\s/g, "_");
+      const durationKey = selectedDuration.duration_label
+        .toUpperCase()
+        .replace(/\s/g, "");
 
       const url = await createStripeSession({
         userId: user.id,
@@ -74,6 +112,8 @@ const MembershipChange = ({ user }) => {
         planKey,
         durationKey,
         requiresContract: selectedDuration.requires_contract || false,
+        // 🔹 Pass preferred location forward (even if null for now)
+        locationId: preferredLocationId || null,
       });
 
       showSuccess("Redirecting to payment...", toastId);
@@ -92,7 +132,9 @@ const MembershipChange = ({ user }) => {
       <h1 className="text-3xl font-bold mb-4">Change Membership</h1>
 
       <div className="w-full max-w-md space-y-4">
-        <label className="block text-sm font-medium">Select Membership Plan</label>
+        <label className="block text-sm font-medium">
+          Select Membership Plan
+        </label>
         <select
           value={selectedPlan}
           onChange={(e) => handlePlanChange(e.target.value)}
@@ -108,7 +150,9 @@ const MembershipChange = ({ user }) => {
 
         {selectedPlan && (
           <>
-            <label className="block text-sm font-medium">Select Duration</label>
+            <label className="block text-sm font-medium">
+              Select Duration
+            </label>
             <select
               value={selectedDurationId}
               onChange={handleDurationChange}
@@ -127,7 +171,7 @@ const MembershipChange = ({ user }) => {
         <button
           onClick={handleSubmit}
           disabled={loading || !selectedDurationId}
-          className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold rounded-xl mt-4"
+          className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold rounded-xl mt-4 disabled:opacity-50"
         >
           {loading ? "Processing..." : "Confirm Change"}
         </button>

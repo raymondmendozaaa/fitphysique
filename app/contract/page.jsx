@@ -1,11 +1,15 @@
 "use client";
 
-import { Suspense } from "react"; // ✅ Add Suspense
-import ContractPageInner from "./ContractPageInner"; // ✅ We'll move your page into a separate component
+import { Suspense } from "react";
+import dynamic from "next/dynamic";
 
-export default function SignContractPage() {
+const ContractPageInner = dynamic(() => import("./ContractPageInner"), {
+  ssr: false,
+});
+
+export default function ContractPage() {
   return (
-    <Suspense fallback={<div>Loading...</div>}>
+    <Suspense fallback={<div>Loading contract..."</div>}>
       <ContractPageInner />
     </Suspense>
   );

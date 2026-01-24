@@ -66,3 +66,12 @@
 .animate-fade-in-slide {
   animation: fade-in-slide 0.5s ease-out forwards;
 }
+
+html,
+body {
+  scrollbar-gutter: stable;
+}
+
+.contract-text {
+  overflow-wrap: anywhere;
+}

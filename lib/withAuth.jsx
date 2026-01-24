@@ -1,114 +1,106 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
+import { useEffect, useState } from "react";
+import useUserData from "@/lib/hooks/useUserData";
 
 const withAuth = (WrappedComponent, requiredRole) => {
   return function AuthComponent() {
     const router = useRouter();
-    const [user, setUser] = useState(null);
-    const [role, setRole] = useState(null);
-    const [membership, setMembership] = useState(null);
-    const [loading, setLoading] = useState(true);
+    const {
+      user,
+      role,
+      onboarded,
+      profileUrl,
+      hasRealPhoto,
+      hasMembership,
+      loading,
+      membershipData,
+    } = useUserData();
+
+    const [ready, setReady] = useState(false);
 
     useEffect(() => {
-      const fetchUser = async () => {
-        setLoading(true);
+      if (loading) return;
 
-        const {
-          data: { user }
-        } = await supabase.auth.getUser();
+      // 1) Not logged in → go to login, preserve returnUrl
+      if (!loading && !user) {
+        const returnUrl =
+          typeof window !== "undefined"
+            ? window.location.pathname + window.location.search
+            : "/";
+        router.replace(
+          `/auth/login?returnUrl=${encodeURIComponent(returnUrl)}`
+        );
+        return;
+      }
 
-        if (!user) {
-          router.push("/");
-          return;
-        }
+      const pathname =
+        typeof window !== "undefined" ? window.location.pathname : "";
 
-        setUser(user);
+      const isOnboardingFlowPage =
+        pathname.startsWith("/onboarding") ||
+        pathname.startsWith("/contract");
 
-        const { data: userData, error: userError } = await supabase
-          .from("users")
-          .select("role, onboarded, profile_url")
-          .eq("id", user.id)
-          .single();
+      const isGuest =
+        membershipData?.plan_name &&
+        membershipData.plan_name.toLowerCase().includes("guest");
 
-        if (userError || !userData) {
-          console.error("Error fetching user:", userError?.message);
-          return;
-        }
+      // 2) Decide if user needs onboarding
+      const needsOnboarding =
+        role === "member" &&
+        (
+          !onboarded ||          // never completed onboarding
+          (!hasRealPhoto && !isGuest) // no real photo & not a guest pass
+        );
 
-        const { role, onboarded, profile_url } = userData;
-        setRole(role);
+      if (needsOnboarding && !isOnboardingFlowPage) {
+        console.log("⏳ Redirecting to onboarding (user not onboarded)");
+        router.push("/onboarding");
+        return;
+      }
 
-        const { data: membershipData, error: membershipError } = await supabase
-          .from("memberships")
-          .select("plan_duration_id")
-          .eq("user_id", user.id)
-          .maybeSingle();
+      // 3) Role-based protection
+      if (requiredRole && role !== requiredRole) {
+        router.push(role === "admin" ? "/admin" : "/member");
+        return;
+      }
 
-        if (membershipError) {
-          console.error("Error fetching membership:", membershipError.message);
-        }
+      setReady(true);
+    }, [
+      loading,
+      user,
+      role,
+      onboarded,
+      profileUrl,
+      hasRealPhoto,
+      hasMembership,
+      membershipData,
+      router,
+      requiredRole,
+    ]);
 
-        const hasMembership = membershipData?.plan_duration_id != null;
-
-        // ✅ Debug Logging
-        console.log("🔍 Auth Check:", {
-          onboarded,
-          profile_url,
-          hasMembership,
-          role,
-        });
-
-        const isOnboardingPage =
-          typeof window !== "undefined" &&
-          window.location.pathname.startsWith("/onboarding");
-
-        const needsOnboarding =
-          role === "member" &&
-          (!onboarded || !profile_url);
-
-        if (needsOnboarding && !isOnboardingPage) {
-          console.log("⏳ Redirecting to onboarding (webhook might still be processing)");
-          setTimeout(() => {
-            router.push("/onboarding");
-          }, 1500);
-          return;
-        }
-
-        if (requiredRole && role !== requiredRole) {
-          router.push(role === "admin" ? "/admin" : "/dashboard");
-          return;
-        }
-
-        if (role === "admin") {
-          setLoading(false);
-          return;
-        }
-
-        if (membershipData?.plan) {
-          setMembership(membershipData.plan);
-        }
-
-        setLoading(false);
-      };
-
-      fetchUser();
-    }, [router]);
-
-    if (loading) {
+    if (loading || !user || !ready) {
       return (
         <div className="flex min-h-screen items-center justify-center bg-gray-950 text-white">
           <div className="text-center space-y-2">
             <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-yellow-400 border-opacity-75 mx-auto" />
-            <p className="text-lg font-medium tracking-wide">Authenticating...</p>
+            <p className="text-lg font-medium tracking-wide">
+              Authenticating...
+            </p>
           </div>
         </div>
       );
     }
 
-    return <WrappedComponent user={user} role={role} membership={membership} />;
+    return (
+      <WrappedComponent
+        user={user}
+        role={role}
+        membership={membershipData}
+        profileUrl={profileUrl}
+      />
+    );
   };
 };
 

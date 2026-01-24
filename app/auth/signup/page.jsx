@@ -1,217 +1,134 @@
 "use client";
 
-import { useState } from "react";
-import useSignup from "@/lib/hooks/useSignup";
-
-export default function SignupPage() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [fullName, setFullName] = useState("");
-
-  const { signup, loading } = useSignup();
-
-  const handleSignup = (e) => {
-    e.preventDefault();
-    signup({ fullName, email, password });
-  };
-
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-950 py-20 px-4 mt-20">
-      <form
-        onSubmit={handleSignup}
-        className="w-full max-w-md bg-gray-900 p-6 rounded-xl shadow-xl space-y-4 text-white"
-      >
-        <h2 className="text-2xl font-bold text-center">Create Account</h2>
-
-        <input
-          type="text"
-          placeholder="Full Name"
-          value={fullName}
-          onChange={(e) => setFullName(e.target.value)}
-          className="w-full p-3 bg-gray-800 rounded"
-          required
-        />
-
-        <input
-          type="email"
-          placeholder="Email Address"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="w-full p-3 bg-gray-800 rounded"
-          required
-        />
-
-        <input
-          type="password"
-          placeholder="Create Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full p-3 bg-gray-800 rounded"
-          required
-        />
-
-        <button
-          type="submit"
-          className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold rounded"
-          disabled={loading}
-        >
-          {loading ? "Creating Account..." : "Sign Up"}
-        </button>
-      </form>
-    </div>
-  );
-}
-
-/*
-"use client";
-
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { createStripeSession } from "@/lib/utils/stripeSession";
+import { groupPlanDurationsByName } from "@/lib/utils/planGrouping";
+import { showError, showSuccess, showLoading, dismissToast } from "@/lib/utils/toastUtils";
 
 export default function SignupPage() {
   const router = useRouter();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
-  const [profileImage, setProfileImage] = useState(null);
-  const [imagePreview, setImagePreview] = useState(null);
-  const [plansWithDurations, setPlansWithDurations] = useState({});
+
+  const [plansByName, setPlansByName] = useState({});
   const [selectedPlan, setSelectedPlan] = useState("");
   const [selectedDurationId, setSelectedDurationId] = useState("");
+  const [selectedDuration, setSelectedDuration] = useState(null);
+
+  const [autoRenewal, setAutoRenewal] = useState(false);
+  const [renewAtDiscountedRate, setRenewAtDiscountedRate] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+
+  // derived
+  const isGuestPass = useMemo(() => {
+    const n = selectedDuration?.plan_name || "";
+    return n === "Guest-Pass" || n.startsWith("Guest Pass");
+  }, [selectedDuration]);
+
+  const isPaidInFull = useMemo(() => {
+    const label = (selectedDuration?.duration_label || "").toLowerCase();
+    return label.includes("paid in full") || label.includes("paid-in-full") || label.includes("pif");
+  }, [selectedDuration]);
 
   useEffect(() => {
-    const fetchPlanDurations = async () => {
+    const loadDurations = async () => {
       const { data, error } = await supabase
         .from("plan_durations")
-        .select("id, plan_name, duration_label, requires_contract");
-
+        .select("id, plan_name, duration_label, requires_contract, is_promotional");
       if (error) {
-        console.error("Error fetching plan durations:", error);
+        showError("Failed to load plans");
         return;
       }
-
-      const grouped = {};
-      data.forEach((item) => {
-        if (!grouped[item.plan_name]) grouped[item.plan_name] = [];
-        grouped[item.plan_name].push(item);
-      });
-      setPlansWithDurations(grouped);
+      setPlansByName(groupPlanDurationsByName(data || []));
     };
-
-    fetchPlanDurations();
+    loadDurations();
   }, []);
 
-  const handleImageChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setProfileImage(file);
-    setImagePreview(URL.createObjectURL(file));
-  };
+  useEffect(() => {
+    if (!selectedPlan || !selectedDurationId) {
+      setSelectedDuration(null);
+      return;
+    }
+    const d = (plansByName[selectedPlan] || []).find((x) => x.id === selectedDurationId);
+    setSelectedDuration(d || null);
+  }, [plansByName, selectedPlan, selectedDurationId]);
 
   const handleSignup = async (e) => {
     e.preventDefault();
+
+    if (!selectedPlan || !selectedDurationId) {
+      showError("Please choose a plan and duration.");
+      return;
+    }
+
     setLoading(true);
-    setError("");
+    const toastId = showLoading("Creating your account...");
 
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    try {
+      // 1) Create auth user
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { full_name: fullName }, // metadata in auth
+        },
+      });
+      if (error) throw error;
+      const authUser = data?.user;
+      if (!authUser?.id) throw new Error("Sign up succeeded but no user was returned.");
 
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-      return;
-    }
+      // 2) Ensure row in public.users
+      const { error: upsertUserErr } = await supabase.from("users").upsert(
+        {
+          id: authUser.id,
+          email,
+          full_name: fullName,
+          role: "member",
+          onboarded: false, // new users start not onboarded
+        },
+        { onConflict: "id" }
+      );
+      if (upsertUserErr) throw upsertUserErr;
 
-    const user = data.user;
-    if (!user) {
-      setError("User registration failed.");
-      setLoading(false);
-      return;
-    }
+      // 3) If the duration requires a contract, go to /contract first
+      if (selectedDuration?.requires_contract) {
+        dismissToast(toastId);
+        showSuccess("Almost there—please sign the contract.");
+        const qs = new URLSearchParams({
+          user_id: authUser.id,
+          plan_duration_id: selectedDuration.id,
+          paid_in_full: String(isPaidInFull),
+          auto_renewal_enabled: String(autoRenewal),
+          renew_at_discounted_rate: String(renewAtDiscountedRate && autoRenewal),
+        }).toString();
 
-    // ✅ Get session for authenticated storage upload
-    const {
-      data: { session },
-      error: sessionError,
-    } = await supabase.auth.getSession();
-
-    if (sessionError || !session) {
-      setError("User must be logged in before uploading profile picture.");
-      setLoading(false);
-      return;
-    }
-    
-    // Upload profile picture
-    let profileUrl = null;
-    if (profileImage) {
-      const fileExt = profileImage.name.split(".").pop();
-      const filePath = `${user.id}.${fileExt}`;
-
-      console.log("📁 Uploading file:", profileImage); // 🔍 Check file exists
-
-      const { error: uploadError } = await supabase.storage
-        .from("profile-pictures")
-        .upload(filePath, profileImage, {
-          cacheControl: "3600",
-          upsert: true,
-          contentType: profileImage.type,
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-          },
-        });
-      
-      
-
-      if (uploadError) {
-        console.error("❌ Upload Error:", uploadError); // 🔍 Detailed error
-        setError(uploadError.message);
-        setLoading(false);
+        router.push(`/contract?${qs}`);
         return;
       }
 
-      const { data: publicURLData } = supabase.storage
-        .from("profile-pictures")
-        .getPublicUrl(filePath);
+      // 4) Otherwise, create Stripe Checkout and send them to pay
+      const checkoutUrl = await createStripeSession({
+        userId: authUser.id,
+        planDurationId: selectedDuration.id,
+        requiresContract: false,
+        paidInFull: isPaidInFull,
+        autoRenewalEnabled: autoRenewal,
+        renewAtDiscountedRate: renewAtDiscountedRate && autoRenewal,
+      });
 
-      profileUrl = publicURLData.publicUrl;
-    }
-
-    // Insert into users table
-    const { error: userInsertError } = await supabase.from("users").insert([
-      {
-        id: user.id,
-        email,
-        full_name: fullName,
-        role: "member",
-        profile_url: profileUrl,
-      },
-    ]);
-
-    if (userInsertError) {
-      setError(userInsertError.message);
+      dismissToast(toastId);
+      showSuccess("Redirecting to payment...");
+      window.location.href = checkoutUrl;
+    } catch (err) {
+      console.error(err);
+      dismissToast();
+      showError(err.message || "Sign up failed.");
       setLoading(false);
-      return;
     }
-
-    // Insert into memberships table
-    const { error: membershipError } = await supabase.from("memberships").insert([
-      {
-        user_id: user.id,
-        plan_duration_id: selectedDurationId,
-      },
-    ]);
-
-    if (membershipError) {
-      setError(membershipError.message);
-      setLoading(false);
-      return;
-    }
-
-    alert("Account created successfully! Please log in.");
-    router.push("/auth/login");
-    setLoading(false);
   };
 
   return (
@@ -221,8 +138,6 @@ export default function SignupPage() {
         className="w-full max-w-md bg-gray-900 p-6 rounded-xl shadow-xl space-y-4 text-white"
       >
         <h2 className="text-2xl font-bold text-center">Create Account</h2>
-
-        {error && <p className="text-red-500">{error}</p>}
 
         <input
           type="text"
@@ -251,72 +166,80 @@ export default function SignupPage() {
           required
         />
 
-        // Profile Picture Upload
-        <div className="flex flex-col space-y-2">
-          <label className="text-sm">Upload Profile Picture (required)</label>
-          <input
-            type="file"
-            accept="image/*"
-            onChange={handleImageChange}
-            className="w-full bg-gray-800 p-2 rounded"
-            required
-          />
-          {imagePreview && (
-            <img
-              src={imagePreview}
-              alt="Preview"
-              className="w-24 h-24 rounded-full mt-2 object-cover border border-gray-600"
-            />
-          )}
-        </div>
-
-        // Membership Plan Dropdown
+        {/* Plan */}
         <select
           value={selectedPlan}
           onChange={(e) => {
             setSelectedPlan(e.target.value);
-            setSelectedDurationId(""); // Reset duration when plan changes
+            setSelectedDurationId("");
+            setSelectedDuration(null);
+            setAutoRenewal(false);
+            setRenewAtDiscountedRate(false);
           }}
           className="w-full p-3 bg-gray-800 rounded"
           required
         >
           <option value="">Select Membership Plan</option>
-          {Object.keys(plansWithDurations).map((planName) => (
-            <option key={planName} value={planName}>
-              {planName}
+          {Object.keys(plansByName).map((plan) => (
+            <option key={plan} value={plan}>
+              {plan}
             </option>
           ))}
         </select>
 
-        // Plan Duration Dropdown (hidden for Guest Pass) 
-        {selectedPlan && selectedPlan !== "Guest Pass" && (
+        {/* Duration */}
+        {selectedPlan && (
           <select
             value={selectedDurationId}
-            onChange={(e) => {
-              const selected = plansWithDurations[selectedPlan].find(
-                (p) => p.id === e.target.value
-              );
-              setSelectedDurationId(e.target.value);
-              if (selected?.requires_contract) {
-                alert("Note: This duration requires a contract.");
-              }
-            }}
+            onChange={(e) => setSelectedDurationId(e.target.value)}
             className="w-full p-3 bg-gray-800 rounded"
             required
           >
-            <option value="">Select Plan Duration</option>
-            {plansWithDurations[selectedPlan]?.map(({ id, duration_label }) => (
-              <option key={id} value={id}>
-                {duration_label}
+            <option value="">Select Duration</option>
+            {(plansByName[selectedPlan] || []).map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.duration_label}
               </option>
             ))}
           </select>
         )}
 
+        {/* Auto-renew + discounted rate (only for members, not guest passes; ignore for promo) */}
+        {!!selectedDuration && !isGuestPass && !selectedDuration.is_promotional && (
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="form-checkbox text-yellow-500"
+                checked={autoRenewal}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setAutoRenewal(checked);
+                  if (!checked) setRenewAtDiscountedRate(false);
+                }}
+              />
+              Enable Auto-Renewal
+            </label>
+
+            {selectedDuration.requires_contract && isPaidInFull && (
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="form-checkbox text-yellow-500"
+                  checked={renewAtDiscountedRate}
+                  onChange={(e) => setRenewAtDiscountedRate(e.target.checked)}
+                  disabled={!autoRenewal}
+                />
+                Renew at Discounted Rate (Paid-in-Full Contracts Only)
+              </label>
+            )}
+          </div>
+        )}
+
         <button
           type="submit"
-          className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold rounded"
-          disabled={loading}
+          className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold rounded disabled:opacity-50"
+          disabled={loading || !selectedPlan || !selectedDurationId}
         >
           {loading ? "Creating Account..." : "Sign Up"}
         </button>
@@ -324,4 +247,3 @@ export default function SignupPage() {
     </div>
   );
 }
-*/

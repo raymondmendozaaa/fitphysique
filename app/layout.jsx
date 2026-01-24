@@ -1,9 +1,14 @@
+import GlobalRouteLogger from '@/components/GlobalRouteLogger';
+import AuthDebug from '@/components/AuthDebug';
 import { Oswald, Roboto } from "next/font/google";
 import "./globals.css";
 // Components
 import Header from "@/components/Header.jsx";
 import Footer from "@/components/Footer.jsx";
 import { Toaster } from "react-hot-toast";
+
+// 🆕 import the provider
+import { UserProvider } from "@/lib/context/UserContext";
 
 const oswald = Oswald({
   variable: "--font-oswald",
@@ -28,10 +33,14 @@ export default function RootLayout({ children }) {
       <body
         className={`${oswald.variable} ${roboto.variable} w-full max-w-[1920px] mx-auto bg-white`}
       >
-        <Toaster position="top-center" />
-        <Header />
-        {children}
-        <Footer />
+        <UserProvider>
+          <Toaster position="top-center" />
+          <Header />
+          <AuthDebug />
+          <GlobalRouteLogger />
+          {children}
+          <Footer />
+        </UserProvider>
       </body>
     </html>
   );

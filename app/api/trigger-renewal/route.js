@@ -1,6 +1,6 @@
 // app/api/trigger-renewal/route.js
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { createStripeSession } from "@/lib/helpers/stripeUtils";
+import { createStripeSession } from "@/lib/utils/stripeSession";
 
 export async function POST(req) {
   const authHeader = req.headers.get("authorization");
@@ -34,12 +34,14 @@ export async function POST(req) {
       expires_at,
       renewal_pending,
       renewal_attempt_count = 0,
+      paid_in_full,
+      renew_at_discounted_rate,
     } = member;
 
     // Skip if renewal already succeeded or retry limit reached
     if (renewal_pending || renewal_attempt_count >= 3) continue;
 
-    // Skip if expires_at is not within 3 days
+    // Skip if not within 3-day window
     const expiresDate = new Date(expires_at);
     if (expiresDate > threeDaysFromNow) continue;
 
@@ -55,17 +57,17 @@ export async function POST(req) {
     try {
       console.log(`🌀 Attempting auto-renewal for ${user_id} (Attempt #${renewal_attempt_count + 1})`);
 
-      // 🔁 Create Stripe Checkout session
+      // 🔁 Create Stripe Checkout session with correct renewal type
       await createStripeSession({
         user_id,
         plan_duration_id,
         auto_renewal_enabled: true,
-        renew_at_discounted_rate: member.renew_at_discounted_rate || false,
-        paid_in_full: member.paid_in_full || false,
+        renew_at_discounted_rate: !!renew_at_discounted_rate,
+        paid_in_full: !!paid_in_full,
         isRenewal: true,
       });
 
-      // Update attempt count + timestamp
+      // Update renewal tracking in DB
       await supabaseAdmin
         .from("memberships")
         .update({
@@ -77,9 +79,26 @@ export async function POST(req) {
         .eq("plan_duration_id", plan_duration_id);
 
     } catch (err) {
-      console.error(`❌ Failed for ${user_id}:`, err.message);
+      console.error(`❌ Failed renewal for ${user_id}:`, err.message);
     }
   }
 
   return Response.json({ message: "Auto-renewals processed" });
+}
+
+export async function GET() {
+  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL}/api/trigger-renewal`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.INTERNAL_SECRET}`,
+    },
+  });
+
+  const data = await res.json();
+  console.log("🧪 Manual trigger test result:", data);
+
+  return new Response(JSON.stringify(data), {
+    status: res.status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
