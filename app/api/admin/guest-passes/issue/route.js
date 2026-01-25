@@ -1,6 +1,6 @@
-// app/api/guest-passes/issue/route.js
+// app/api/admin/guest-passes/issue/route.js
 import { NextResponse } from "next/server";
-import { supabaseAmin as supabase } from "@/lib/supabaseAdmin";
+import { supabaseAdmin as supabase } from "@/lib/supabaseAdmin";
 
 export async function POST(req) {
   try {

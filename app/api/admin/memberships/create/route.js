@@ -54,7 +54,7 @@ async function ensureAdmin(req) {
 
 export async function POST(req) {
   try {
-    const { supabase }}await ensureAdmin(req);
+    const { supabase } = await ensureAdmin(req);
 
     const payload = await req.json();
     const { userId: incomingUserId, planDurationId, paymentMode, newUser } = payload || {};
