@@ -1,3 +1,6 @@
+"use client";
+
+
 import { useState, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { createStripeSession } from "@/lib/utils/stripeSession";
@@ -273,7 +276,7 @@ export default function ContractPageInner() {
       <form onSubmit={handleSubmit} className="w-full max-w-2xl">
         <div
           className="w-full bg-gray-900 rounded-2xl shadow-xl border border-gray-800 grid"
-          style={{ gridTemplateRows: "auto 1fr auto", height: "calc(100vh - 160px" }}
+          style={{ gridTemplateRows: "auto 1fr auto", height: "calc(100vh - 160px)" }}
         >
           {/* Header */}
           <div className="p-6 border-b border-gray-800">
