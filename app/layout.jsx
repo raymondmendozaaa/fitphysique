@@ -6,6 +6,7 @@ import "./globals.css";
 import Header from "@/components/Header.jsx";
 import Footer from "@/components/Footer.jsx";
 import { Toaster } from "react-hot-toast";
+import { Suspense } from "react";
 
 // 🆕 import the provider
 import { UserProvider } from "@/lib/context/UserContext";
@@ -37,7 +38,9 @@ export default function RootLayout({ children }) {
           <Toaster position="top-center" />
           <Header />
           <AuthDebug />
-          <GlobalRouteLogger />
+          <Suspense fallback={null}>
+            <GlobalRouteLogger />
+          </Suspense>
           {children}
           <Footer />
         </UserProvider>
