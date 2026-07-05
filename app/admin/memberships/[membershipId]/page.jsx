@@ -7,6 +7,12 @@ import withAuth from '@/lib/withAuth';
 import { supabase } from '@/lib/supabaseClient';
 import MembershipControls from '@/components/admin/memberships/MembershipControls';
 import Link from 'next/link';
+import { 
+  formatAdminDate, 
+  formatAdminDateTime,
+  getNowUtcIso,
+  toValidDate,
+} from '@/lib/utils/dateTime';
 
 function MembershipDetailPage() {
   const { membershipId } = useParams();
@@ -51,9 +57,13 @@ function MembershipDetailPage() {
   const hasBillingDayOverride = !!override?.desired_billing_day;
   const hasGrace = !!override?.grace_start && !!override?.grace_end;
   const isPaused = useMemo(() => {
-    if (!override?.pause_until) return false;
-    const until = new Date(override.pause_until);
-    return !Number.isNaN(until.getTime()) && until > new Date();
+    const until = toValidDate(override?.pause_until);
+    if (!until) return false;
+    
+    const now = toValidDate(getNowUtcIso());
+    if (!now) return false;
+    
+    return until.getTime() > now.getTime();
   }, [override?.pause_until]);
 
   return (
@@ -110,9 +120,7 @@ function MembershipDetailPage() {
               <div>
                 <div className="text-gray-400">Next Payment</div>
                 <div className="font-medium flex flex-wrap items-center gap-2">
-                  {row.next_payment_date
-                    ? new Date(row.next_payment_date).toLocaleDateString()
-                    : '—'}
+                  {row.next_payment_date ? formatAdminDate(row.next_payment_date) : '—'}
 
                   {hasBillingDayOverride && (
                     <span
@@ -128,8 +136,7 @@ function MembershipDetailPage() {
                       className="text-xs px-2 py-1 rounded-full bg-emerald-900/40 border border-emerald-700 text-emerald-200"
                       title="Temporary grace access window"
                     >
-                      Grace {new Date(override.grace_start).toLocaleDateString()}–
-                      {new Date(override.grace_end).toLocaleDateString()}
+                      Grace {formatAdminDate(override.grace_start)}–{formatAdminDate(override.grace_end)}
                     </span>
                   )}
 
@@ -138,7 +145,7 @@ function MembershipDetailPage() {
                       className="text-xs px-2 py-1 rounded-full bg-yellow-900/40 border border-yellow-700 text-yellow-200"
                       title="Membership is paused until this date"
                     >
-                      Paused until {new Date(override.pause_until).toLocaleDateString()}
+                      Paused until {formatAdminDate(override.pause_until)}
                     </span>
                   )}
                 </div>
@@ -147,9 +154,7 @@ function MembershipDetailPage() {
               <div>
                 <div className="text-gray-400">Contract Ends</div>
                 <div className="font-medium">
-                  {row.contract_end_date
-                    ? new Date(row.contract_end_date).toLocaleDateString()
-                    : '—'}
+                  {row.contract_end_date ? formatAdminDate(row.contract_end_date) : '—'}
                 </div>
               </div>
 
@@ -161,9 +166,7 @@ function MembershipDetailPage() {
               <div>
                 <div className="text-gray-400">Period End</div>
                 <div className="font-medium">
-                  {row.current_period_end
-                    ? new Date(row.current_period_end).toLocaleString()
-                    : '—'}
+                  {row.current_period_end ? formatAdminDateTime(row.current_period_end) : '—'}
                 </div>
               </div>
             </div>
@@ -183,13 +186,12 @@ function MembershipDetailPage() {
                     )}
                     {override.pause_until && (
                       <li>
-                        Access paused until {new Date(override.pause_until).toLocaleDateString()}.
+                        Access paused until {formatAdminDate(override.pause_until)}.
                       </li>
                     )}
                     {override.grace_start && override.grace_end && (
                       <li>
-                        Grace: {new Date(override.grace_start).toLocaleDateString()} →{' '}
-                        {new Date(override.grace_end).toLocaleDateString()}.
+                        Grace: {formatAdminDate(override.grace_start)} → {formatAdminDate(override.grace_end)}.
                       </li>
                     )}
                   </ul>

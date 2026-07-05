@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
+import { fetchUserById } from "@/lib/db/users";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -37,14 +38,19 @@ export async function POST(req) {
     }
 
     // 1️⃣ Look up the user in your "users" table
-    const { data: user, error: userError } = await supabaseAdmin
-      .from("users")
-      .select("id, email, full_name")
-      .eq("id", user_id)
-      .single();
+    let user;
 
-    if (userError || !user) {
+    try {
+      user = await fetchUserPasswordResetIdentityById(supabaseAdmin, user_id);
+    } catch (userError) {
       console.error("[send-password-reset] User lookup failed:", userError);
+      return NextResponse.json(
+        { ok: false, error: "Failed to load user." },
+        { status: 500 }
+      );
+    }
+
+    if (!user) {
       return NextResponse.json(
         { ok: false, error: "User not found." },
         { status: 404 }

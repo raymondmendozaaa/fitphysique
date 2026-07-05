@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
+import { fetchUserById, fetchUserById, updateUserById } from "@/lib/db/users";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -43,13 +44,13 @@ export async function POST(req) {
     const normalizedMode = mode === "magic" ? "magic" : "login";
 
     // 1️⃣ Fetch user from DB
-    const { data: user, error: userError } = await supabaseAdmin
-      .from("users")
-      .select("id, email, full_name")
-      .eq("id", user_id)
-      .single();
+    const user = await fetchUserById(
+      supabaseAdmin,
+      user_id,
+      "id, email, full_name"
+    );
 
-    if (userError || !user) {
+    if (!user) {
       console.error("User lookup failed:", userError);
       return NextResponse.json(
         { ok: false, error: "User not found." },

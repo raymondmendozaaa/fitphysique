@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabaseClient";
+import { supabaseAdmin as supabase } from "@/lib/supabaseAdmin";
+import { fetchAccessEligibleMembershipForUser } from "@/lib/db/memberships";
+import { fetchUserAccessIdentityByEmailOrBarcode } from "@/lib/db/users";
 
 export async function POST(req) {
   try {
@@ -10,38 +12,51 @@ export async function POST(req) {
     }
 
     // 🔹 Check for user by email OR barcode
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("id, email")
-      .or(`email.eq.${email}, barcode.eq.${barcode}`)
-      .maybeSingle();
+    let user = null;
 
-    if (userError || !user) {
+    try {
+      user = await fetchUserAccessIdentityByEmailOrBarcode(supabase, {
+        email,
+        barcode,
+      });
+    } catch (userLookupError) {
+      console.error("❌ Failed to fetch user:", userLookupError);
+      return NextResponse.json({ error: "Failed to load user" }, { status: 500 });
+    }
+
+    if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
-    // 🔹 Check membership status
-    const { data: membership, error: membershipError } = await supabase
-      .from("memberships")
-      .select("plan, status, expires_at")
-      .eq("user_id", user.id)
-      .maybeSingle();
+    // 🔹 Check access-eligible membership
+    let membership = null;
 
-    if (membershipError || !membership) {
-      return NextResponse.json({ error: "No active membership found" }, { status: 403 });
+    try {
+      membership = await fetchAccessEligibleMembershipForUser(supabase, user.id);
+    } catch (membershipError) {
+      console.error("❌ Failed to fetch access-eligible membership:", membershipError);
+    
+      return NextResponse.json(
+        { error: "Failed to load membership" },
+        { status: 500 }
+      );
     }
 
-    // 🔹 Validate expiration date
-    const today = new Date();
-    today.setHours(0, 0, 0, 0); // Midnight reset
-
-    const expiresAt = membership.expires_at ? new Date(membership.expires_at) : null;
-
-    if (!expiresAt || expiresAt < today) {
-      return NextResponse.json({ error: "Membership expired", status: "denied" }, { status: 403 });
+    if (!membership) {
+      return NextResponse.json(
+        {
+          error: "No active access-eligible membership found",
+          status: "denied",
+        },
+        { status: 403 }
+      );
     }
 
-    return NextResponse.json({ message: "Access granted", status: "approved" });
+    return NextResponse.json({
+      message: "Access granted",
+      status: "approved",
+      membership_id: membership.id,
+    });
   } catch (error) {
     console.error("Error checking gym access:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

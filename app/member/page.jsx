@@ -5,19 +5,28 @@ import Link from "next/link";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { fetchUserByIdClient } from "@/lib/queries/users.client";
 import { fetchStripeSubscription } from "@/lib/helpers/fetchStripeSubscription";
+import { fetchMembershipEntitlementClient } from "@/lib/queries/memberships.client";
 import { handleCheckIn } from "@/lib/utils/checkIn";
 import { showSuccess, showError } from "@/lib/utils/toastUtils";
+import { 
+  APP_TIMEZONE, 
+  formatDateInTimeZone, 
+  getNowUtcIso,
+  toValidDate
+} from "@/lib/utils/dateTime";
 
 const MemberDashboard = ({ user, role, profileUrl }) => {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [hasActiveContract, setHasActiveContract] = useState(false);
-  const [contractEndDate, setContractEndDate] = useState("N/A");
-  const [nextPaymentDate, setNextPaymentDate] = useState("N/A");
+  const [contractEndDateValue, setContractEndDateValue] = useState(null);
+  const [nextPaymentDateValue, setNextPaymentDateValue] = useState(null);
+  const [graceEndsAtValue, setGraceEndsAtValue] = useState(null);
   const [currentPlan, setCurrentPlan] = useState("None");
   const [isExpired, setIsExpired] = useState(false);
-  const [membershipStatus, setMembershipStatus] = useState("active");
+  const [membershipStatus, setMembershipStatus] = useState("inactive");
   const [stripeSubId, setStripeSubId] = useState(null);
   const [promoDays, setPromoDays] = useState(null);
   const [autoRenewalEnabled, setAutoRenewalEnabled] = useState(false);
@@ -36,15 +45,10 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
     let homeLabel = "";
 
     try {
-      const { data: userRow, error: userErr } = await supabase
-        .from("users")
-        .select("timezone, preferred_location_id")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (userErr) {
-        console.error("❌ Error fetching user prefs:", userErr);
-      }
+      const userRow = await fetchUserByIdClient(
+        user.id,
+        "timezone, preferred_location_id"
+      );
 
       if (userRow) {
         if (userRow.timezone) {
@@ -79,34 +83,18 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       console.error("❌ Unexpected error loading user prefs:", err);
     }
 
-    const dateFormatter = new Intl.DateTimeFormat("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-      timeZone: memberTimezone,
-    });
-
     // 2) Fetch membership details
-    const { data: membershipData, error: membershipError } = await supabase
-      .from("memberships")
-      .select(`
-        status,
-        contract_end_date,
-        next_payment_date,
-        stripe_subscription_id,
-        promo_start_date,
-        promo_end_date,
-        auto_renewal_enabled,
-        plan_duration:plan_durations (
-          plan_name,
-          requires_contract
-        )
-      `)
-      .eq("user_id", user.id)
-      .maybeSingle();
+    let membershipData = null;
+    let latestMembership = null;
+    let guestPass = null;
 
-    if (membershipError) {
-      console.error("❌ Error fetching membership:", membershipError);
+    try {
+      const entitlement = await fetchMembershipEntitlementClient(user.id);
+      membershipData = entitlement.membership;
+      latestMembership = entitlement.latestMembership;
+      guestPass = entitlement.guestPass;
+    } catch (membershipError) {
+      console.error("❌ Error fetching membership entitlement:", membershipError);
     }
 
     if (membershipData) {
@@ -114,87 +102,90 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       const hasContract = !!membershipData?.plan_duration?.requires_contract;
       const subId = membershipData?.stripe_subscription_id || null;
 
+      setIsExpired(false);
       setMembershipStatus(membershipData.status || "unknown");
       setAutoRenewalEnabled(!!membershipData.auto_renewal_enabled);
       setCurrentPlan(planName);
       setHasActiveContract(hasContract);
       setStripeSubId(subId);
 
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
       // ✅ Contract End Date
-      if (membershipData.contract_end_date) {
-        const endDateRaw = new Date(membershipData.contract_end_date);
-        const isValidDate =
-          endDateRaw instanceof Date && !isNaN(endDateRaw.getTime());
+      const contractEndDate = toValidDate(membershipData.contract_end_date);
 
-        if (isValidDate) {
-          setContractEndDate(dateFormatter.format(endDateRaw));
-        } else {
-          console.warn(
-            "⚠️ Invalid contract_end_date:",
-            membershipData.contract_end_date
-          );
-          setContractEndDate("N/A");
-        }
-      } else {
-        setContractEndDate("N/A");
+      if (membershipData.contract_end_date && !contractEndDate) {
+        console.warn(
+          "⚠️ Invalid contract_end_date:",
+          membershipData.contract_end_date
+        );
       }
+      
+      setContractEndDateValue(contractEndDate);
+      setGraceEndsAtValue(toValidDate(membershipData.grace_ends_at));
 
       // ✅ Next Payment Date
-      if (membershipData.next_payment_date) {
-        const next = new Date(membershipData.next_payment_date);
-        setNextPaymentDate(dateFormatter.format(next));
-      } else {
-        setNextPaymentDate("N/A");
-      }
+      setNextPaymentDateValue(toValidDate(membershipData.next_payment_date));
 
       // ✅ Promo display
-      if (membershipData.promo_start_date && membershipData.promo_end_date) {
-        const promoStart = new Date(membershipData.promo_start_date);
-        const promoEnd = new Date(membershipData.promo_end_date);
+      const promoStart = toValidDate(membershipData.promo_start_date);
+      const promoEnd = toValidDate(membershipData.promo_end_date);
+          
+      if (promoStart && promoEnd) {
         const promoDaysVal = Math.ceil(
-          (promoEnd - promoStart) / (1000 * 60 * 60 * 24)
+          (promoEnd.getTime() - promoStart.getTime()) / (1000 * 60 * 60 * 24)
         );
-        setPromoDays(promoDaysVal);
+      
+        setPromoDays(Math.max(0, promoDaysVal));
       } else {
         setPromoDays(null);
       }
+    } else if (guestPass) {
+      const expiresDate = toValidDate(guestPass.expires_at);
+      const nowDate = toValidDate(getNowUtcIso());
+      const expired =
+        !expiresDate || !nowDate || expiresDate.getTime() < nowDate.getTime();
+
+      setIsExpired(expired);
+      setCurrentPlan("Guest Pass");
+      setHasActiveContract(false);
+      setMembershipStatus(expired ? "expired" : "active");
+      setContractEndDateValue(expiresDate);
+      setGraceEndsAtValue(null);
+      setNextPaymentDateValue(null);
+      setStripeSubId(null);
+      setAutoRenewalEnabled(false);
+    } else if (latestMembership) {
+      const latestStatus = String(latestMembership.status || "").toLowerCase();
+      const latestExpiresAt = toValidDate(latestMembership.expires_at);
+      const latestGraceEndsAt = toValidDate(latestMembership.grace_ends_at);
+      const nowDate = toValidDate(getNowUtcIso());
+
+      const isActuallyExpired =
+        latestStatus === "expired" ||
+        latestStatus === "terminated" ||
+        latestStatus === "suspended" ||
+        (!!latestExpiresAt &&
+          !!nowDate &&
+          latestExpiresAt.getTime() <= nowDate.getTime());
+
+      setIsExpired(!!isActuallyExpired);
+      setCurrentPlan(latestMembership?.plan_duration?.plan_name || "None");
+      setHasActiveContract(!!latestMembership?.plan_duration?.requires_contract);
+      setMembershipStatus(latestMembership.status || "inactive");
+      setContractEndDateValue(latestExpiresAt || null);
+      setGraceEndsAtValue(latestGraceEndsAt || null);
+      setNextPaymentDateValue(null);
+      setStripeSubId(null);
+      setAutoRenewalEnabled(!!latestMembership.auto_renewal_enabled);
     } else {
-      // 3) Fallback: guest pass
-      const { data: guestPass, error: guestError } = await supabase
-        .from("guest_passes")
-        .select("expires_at")
-        .eq("user_id", user.id)
-        .order("expires_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (guestError && guestError.code !== "PGRST116") {
-        console.error("❌ Error fetching guest pass:", guestError);
-      }
-
-      if (guestPass) {
-        const expiresDate = new Date(guestPass.expires_at);
-        const nowDate = new Date();
-        const expired = expiresDate < nowDate;
-
-        setIsExpired(expired);
-        setCurrentPlan("Guest Pass");
-        setHasActiveContract(false);
-        setMembershipStatus(expired ? "expired" : "active");
-        setContractEndDate(dateFormatter.format(expiresDate));
-        setNextPaymentDate("N/A");
-      } else {
-        // 🚨 Neither membership nor guest pass found
-        setIsExpired(true);
-        setCurrentPlan("None");
-        setHasActiveContract(false);
-        setMembershipStatus("inactive");
-        setContractEndDate("N/A");
-        setNextPaymentDate("N/A");
-      }
+      setIsExpired(true);
+      setCurrentPlan("None");
+      setHasActiveContract(false);
+      setMembershipStatus("inactive");
+      setContractEndDateValue(null);
+      setGraceEndsAtValue(null);
+      setNextPaymentDateValue(null);
+      setStripeSubId(null);
+      setAutoRenewalEnabled(false);
     }
   };
 
@@ -211,19 +202,13 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
     const fetchNextPaymentDate = async () => {
       const subscription = await fetchStripeSubscription(user.id);
       if (subscription?.current_period_end) {
-        const next = new Date(subscription.current_period_end * 1000);
-        const formatter = new Intl.DateTimeFormat("en-US", {
-          year: "numeric",
-          month: "long",
-          day: "numeric",
-          timeZone: timezone || "America/Chicago",
-        });
-        setNextPaymentDate(formatter.format(next));
+        const next = toValidDate(subscription.current_period_end * 1000);
+        setNextPaymentDateValue(next);
       }
     };
 
     fetchNextPaymentDate();
-  }, [user, stripeSubId, timezone]);
+  }, [user, stripeSubId]);
 
   const handleCancelMembership = async () => {
     if (hasActiveContract) {
@@ -240,13 +225,16 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
     try {
       const res = await fetch("/api/membership/cancel", {
         method: "POST",
-        body: JSON.stringify({ userId: user.id }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Cancellation failed");
 
-      showSuccess("✅ Membership cancellation scheduled.");
+      showSuccess("✅ Your membership will not renew. Access remains until your current access period ends.");
       await fetchDetails();
     } catch (err) {
       showError(err.message || "❌ Something went wrong.");
@@ -254,6 +242,22 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       setLoading(false);
     }
   };
+
+  const formattedContractEndDate = contractEndDateValue
+    ? formatDateInTimeZone(contractEndDateValue, timezone || APP_TIMEZONE)
+    : "N/A";
+
+  const formattedMembershipEndDate = contractEndDateValue
+    ? formatDateInTimeZone(contractEndDateValue, timezone || APP_TIMEZONE)
+    : "N/A";
+
+  const formattedGraceEndsAt = graceEndsAtValue
+    ? formatDateInTimeZone(graceEndsAtValue, timezone || APP_TIMEZONE)
+    : "N/A";
+
+  const formattedNextPaymentDate = nextPaymentDateValue
+    ? formatDateInTimeZone(nextPaymentDateValue, timezone || APP_TIMEZONE)
+    : "N/A";
 
   const onCheckInClick = async () => {
     if (isCheckingIn) return;
@@ -303,6 +307,11 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
         </p>
       )}
 
+      <p className="mt-1 text-xs text-gray-500 text-center">
+        Billing, renewals, and access cutoffs are based on{" "}
+        <span className="font-mono font-semibold">{APP_TIMEZONE}</span>.
+      </p>
+
       <p className="mt-4">
         Membership Level:{" "}
         <span className="font-semibold text-accent">
@@ -310,10 +319,12 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
         </span>
       </p>
 
-      {membershipStatus === "cancelled" && (
-        <div className="mt-4 p-3 rounded bg-red-900 text-red-400 font-semibold transform transition-all duration-500 ease-out animate-fade-in-slide text-center">
-          🚫 Membership cancellation is scheduled. You'll retain access until
-          the end of your billing period.
+      {membershipStatus === "cancelled" && !isExpired && (
+        <div className="mt-4 p-3 rounded bg-yellow-900/40 text-yellow-300 border border-yellow-700 font-semibold text-center">
+          ⚠️ Your membership will not renew. Access remains until{" "}
+          <span className="underline">
+            {graceEndsAtValue ? formattedGraceEndsAt : formattedContractEndDate}
+          </span>.
         </div>
       )}
 
@@ -322,12 +333,26 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
         <>
           <p className="mt-2 text-sm text-green-400">
             📜 Contract Active Until:{" "}
-            <span className="font-semibold">{contractEndDate || "N/A"}</span>
+            <span className="font-semibold">{formattedContractEndDate}</span>
           </p>
-          {nextPaymentDate && (
+          {graceEndsAtValue && (
+            <p className="mt-2 text-sm text-yellow-300">
+              ⏳ Grace Period Ends:{" "}
+              <span className="font-semibold">{formattedGraceEndsAt}</span>
+            </p>
+          )}
+          {nextPaymentDateValue && (
             <p className="mt-2 text-sm text-accent">
               💳 Next Payment Date:{" "}
-              <span className="font-semibold">{nextPaymentDate}</span>
+              <span className="font-semibold">{formattedNextPaymentDate}</span>
+            </p>
+          )}
+          {currentPlan !== "None" && currentPlan !== "Guest Pass" && (
+            <p className="mt-2 text-sm text-gray-300">
+              Auto-Renew:{" "}
+              <span className="font-semibold">
+                {autoRenewalEnabled ? "Enabled" : "Disabled"}
+              </span>
             </p>
           )}
         </>
@@ -337,17 +362,35 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       {!hasActiveContract && currentPlan === "Guest Pass" ? (
         <p className="mt-2">
           Valid Until:{" "}
-          <span className="font-semibold text-accent">{contractEndDate}</span>
-          <span className="text-sm text-muted ml-1"> (expires at 12 a.m.)</span>
+          <span className="font-semibold text-accent">
+            {formattedContractEndDate}
+          </span>
+          <span className="text-sm text-muted ml-1">
+            {" "}
+            (cutoff based on {APP_TIMEZONE})
+          </span>
         </p>
       ) : (
         !hasActiveContract && (
-          <p className="mt-2">
-            Next Payment Date:{" "}
-            <span className="font-semibold text-accent">
-              {nextPaymentDate || "N/A"}
-            </span>
-          </p>
+          <>
+            <p className="mt-2">
+              {membershipStatus === "cancelled" ? "Access Until:" : "Next Payment Date:"}{" "}
+              <span className="font-semibold text-accent">
+                {membershipStatus === "cancelled"
+                  ? graceEndsAtValue
+                    ? formattedGraceEndsAt
+                    : formattedContractEndDate
+                  : formattedNextPaymentDate}
+              </span>
+            </p>
+                
+            {currentPlan !== "Guest Pass" && graceEndsAtValue && (
+              <p className="mt-2 text-sm text-yellow-300">
+                ⏳ Grace Period Ends:{" "}
+                <span className="font-semibold">{formattedGraceEndsAt}</span>
+              </p>
+            )}
+          </>
         )
       )}
 
@@ -377,9 +420,16 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       {isExpired && currentPlan !== "Guest Pass" ? (
         <div className="mt-6 bg-red-800 p-4 rounded text-center">
           <p className="text-white font-semibold">
-            ⚠️ Your membership expired on{" "}
-            <span className="underline">{contractEndDate || "N/A"}</span>.
-            Renew now to regain access.
+            ⚠️ Your membership ended on{" "}
+            <span className="underline">{formattedMembershipEndDate}</span>
+            {graceEndsAtValue && (
+              <>
+                {" "}
+                and your grace period ended on{" "}
+                <span className="underline">{formattedGraceEndsAt}</span>
+              </>
+            )}
+            . Renew now to regain access.
           </p>
           <button
             className="mt-4 px-6 py-2 bg-yellow-500 hover:bg-yellow-600 rounded"

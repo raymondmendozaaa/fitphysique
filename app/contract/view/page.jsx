@@ -4,13 +4,13 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useRouter } from "next/navigation";
 import { showError } from "@/lib/utils/toastUtils";
+import { formatDateTimeInTimeZone } from "@/lib/utils/dateTime";
 import withAuth from "@/lib/withAuth";
 import ContractPDFPreview from "@/components/ContractPDFPreview";
 
 function ViewContract({ user }) {
   const [contractData, setContractData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -45,16 +45,6 @@ function ViewContract({ user }) {
 
     fetchContract();
   }, [user.id]);
-
-  const formatDate = (timestamp) => {
-    if (!timestamp) return "N/A";
-    const [datePart, timePart] = timestamp.split("T");
-    const [year, month, day] = datePart.split("-");
-    const [hour, minute, second] = timePart.split(":");
-    
-    const formattedTime = `${parseInt(hour) % 12 || 12}:${minute}:${second.slice(0, 2)} ${hour >= 12 ? "PM" : "AM"}`;
-    return `${month}/${day}/${year}, ${formattedTime}`;
-  };
 
   if (loading) {
     return (
@@ -101,7 +91,7 @@ function ViewContract({ user }) {
           <p><span className="font-semibold">Version:</span> {contracts?.version || "N/A"}</p>
           <p><span className="font-semibold">Signed By:</span> {signature || "N/A"}</p>
           <p><span className="font-semibold">Agreed:</span> {agreed ? "Yes" : "No"}</p>
-          <p><span className="font-semibold">Signed On:</span> {formatDate(created_at)}</p>
+          <p><span className="font-semibold">Signed On:</span> {formatDateTimeInTimeZone(created_at)}</p>
           <p><span className="font-semibold">IP Address:</span> {ip_address || "N/A"}</p>
           <p><span className="font-semibold">Location:</span> {contractData.location?.name || "N/A"}</p>
         </div>

@@ -1,8 +1,13 @@
-// app/api/memberships/clear-overrides/route.js
+// app/api/admin/memberships/clear-overrides/route.js
 import { createServerClient } from "@supabase/ssr";
 import { cookies as nextCookies } from "next/headers";
+import { fetchMembershipById, updateMembershipById } from "@/lib/db/memberships";
 
 export async function POST(req) {
+  if (process.env.VERCEL_ENV === "preview") {
+    return new Response("Admin API disabled in Preview", { status: 403 });
+  }
+
   try {
     const body = await req.json();
     const membershipId = body?.membershipId;
@@ -26,14 +31,45 @@ export async function POST(req) {
       }
     );
 
-    // Verify the membership actually exists before trying to clear anything
-    const { data: existingMembership, error: findErr } = await supabase
-      .from("memberships")
-      .select("id")
-      .eq("id", membershipId)
+    const {
+      data: { user: authUser },
+      error: authError,
+    } = await supabase.auth.getUser();
+    
+    if (authError || !authUser) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "Unauthorized." }),
+        { status: 401, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    
+    const { data: adminProfile, error: roleError } = await supabase
+      .from("users")
+      .select("role")
+      .eq("id", authUser.id)
       .single();
+    
+    if (roleError || adminProfile?.role !== "admin") {
+      return new Response(
+        JSON.stringify({ ok: false, error: "Forbidden." }),
+        { status: 403, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
-    if (findErr || !existingMembership) {
+    // Verify the membership actually exists before trying to clear anything
+    let existingMembership = null;
+
+    try {
+      existingMembership = await fetchMembershipById(supabase, membershipId);
+    } catch (findErr) {
+      console.error("❌ Failed to fetch membership:", findErr);
+      return new Response(
+        JSON.stringify({ ok: false, error: "Failed to load membership." }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!existingMembership) {
       return new Response(
         JSON.stringify({ ok: false, error: "Membership not found." }),
         { status: 404, headers: { "Content-Type": "application/json" } }
@@ -90,12 +126,9 @@ export async function POST(req) {
       );
     }
 
-    const { error: updErr } = await supabase
-      .from("memberships")
-      .update(updateObj)
-      .eq("id", membershipId);
-
-    if (updErr) {
+    try {
+      await updateMembershipById(supabase, membershipId, updateObj);
+    } catch (updErr) {
       console.error(updErr);
       return new Response(
         JSON.stringify({ ok: false, error: "Failed to clear overrides." }),

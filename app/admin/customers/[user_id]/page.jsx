@@ -6,10 +6,25 @@ import { useParams, useSearchParams } from "next/navigation";
 import withAuth from "@/lib/withAuth";
 import { supabase } from "@/lib/supabaseClient";
 import Link from "next/link";
+import { createStripeSession } from "@/lib/utils/stripeSession";
 import { showError, showSuccess } from "@/lib/utils/toastUtils";
+import {
+  formatAdminDate,
+  formatAdminDateTime,
+  getNowUtcIso,
+  toValidDate,
+  addDaysToUtcIso,
+} from "@/lib/utils/dateTime";
 import { isPIFMembership, isWithinDaysOfExpiry } from "@/lib/helpers/pifEndHelpers";
+import { fetchMembershipsForUser } from "@/lib/db/memberships";
+import { fetchAdminCustomerById, fetchUserBasicIdentityById } from "@/lib/db/users";
+import { fetchAllPlanDurationsClient } from "@/lib/queries/planDurations.client";
+import { fetchGuestPassesForUserClient } from "@/lib/queries/guestPasses.client";
+import { fetchPaymentsForUserClient } from "@/lib/queries/payments.client";
 
 const TABS = ["overview", "memberships", "guest-passes", "payments", "checkins", "notes"];
+
+const MEMBERSHIP_GRACE_DAYS = 3;
 
 function cls(...parts) { return parts.filter(Boolean).join(" "); }
 
@@ -43,6 +58,125 @@ function money(cents, currency = "USD") {
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(cents / 100);
 }
 
+// ---- PAYMENTS UI HELPERS ----
+
+// Flip this later if you prefer colored text instead of pills
+const USE_PAYMENT_STATUS_PILL = true;
+
+function getPaymentCents(p) {
+  if (!p) return null;
+  if (typeof p.amount_cents === "number") return p.amount_cents;
+  if (p.amount != null && !Number.isNaN(Number(p.amount))) {
+    return Math.round(Number(p.amount) * 100);
+  }
+  return null;
+}
+
+function normalizeStatus(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+function prettyPaymentStatus(statusRaw) {
+  const s = normalizeStatus(statusRaw);
+  if (!s) return "—";
+  return s.replace(/_/g, " ");
+}
+
+function Spinner() {
+  return (
+    <span
+      className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-500 border-t-transparent"
+      aria-hidden="true"
+    />
+  );
+}
+
+// Class map for pill + text
+function paymentStatusClasses(statusRaw) {
+  const s = normalizeStatus(statusRaw);
+
+  // common Stripe-ish + your own statuses
+  if (s === "succeeded" || s === "paid" || s === "success") {
+    return {
+      pill: "bg-green-900/30 text-green-300 border-green-700",
+      text: "text-green-300",
+    };
+  }
+
+  if (s === "pending" || s === "processing") {
+    return {
+      pill: "bg-blue-900/30 text-blue-300 border-blue-700",
+      text: "text-blue-300",
+    };
+  }
+
+  if (s === "failed") {
+    return {
+      pill: "bg-red-900/30 text-red-300 border-red-700",
+      text: "text-red-300",
+    };
+  }
+
+  if (s === "refunded") {
+    return {
+      pill: "bg-orange-900/30 text-orange-300 border-orange-700",
+      text: "text-orange-300",
+    };
+  }
+
+  if (s === "canceled" || s === "cancelled") {
+    return {
+      pill: "bg-gray-800 text-gray-300 border-gray-700",
+      text: "text-gray-300",
+    };
+  }
+
+  return {
+    pill: "bg-gray-800 text-gray-300 border-gray-700",
+    text: "text-gray-300",
+  };
+}
+
+function PaymentStatus({ status }) {
+  const meta = paymentStatusClasses(status);
+  const label = prettyPaymentStatus(status);
+
+  if (!USE_PAYMENT_STATUS_PILL) {
+    return <span className={cls("text-xs font-medium", meta.text)}>{label}</span>;
+  }
+
+  const s = normalizeStatus(status);
+  const showSpin = s === "pending" || s === "processing";
+
+  return (
+    <span className={cls("inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border", meta.pill)}>
+      {showSpin ? <Spinner /> : null}
+      {label}
+    </span>
+  );
+}
+
+function PaymentAmount({ p }) {
+  const cents = getPaymentCents(p);
+  const status = normalizeStatus(p?.status);
+
+  let amountCls = "text-gray-400";
+
+  if (["succeeded", "paid", "success"].includes(status)) {
+    amountCls = "text-green-300";
+  } else if (status === "failed") {
+    amountCls = "text-red-400";
+  } else if (status === "refunded") {
+    amountCls = "text-orange-300";
+  }
+
+  return (
+    <div className={amountCls}>
+      {money(cents, p?.currency || "USD")}
+    </div>
+  );
+}
+
 function truncateMiddle(str = "", keep = 6) {
   if (!str || str.length <= keep * 2 + 3) return str;
   return `${str.slice(0, keep)}…${str.slice(-keep)}`;
@@ -50,7 +184,8 @@ function truncateMiddle(str = "", keep = 6) {
 
 function latestMembership(memberships = []) {
   return [...memberships].sort((a, b) =>
-    new Date(b.start_date || 0) - new Date(a.start_date || 0)
+    (toValidDate(b.start_date) || new Date(0)) -
+    (toValidDate(a.start_date) || new Date(0))
   )[0] || null;
 }
 
@@ -58,19 +193,12 @@ function activeMembership(memberships = []) {
   return memberships.find(m => (m.status || "").toLowerCase() === "active") || null;
 }
 
-function addDaysLocal(dateISO, days) {
-  if (!dateISO) return null;
-  const d = new Date(dateISO);
-  if (Number.isNaN(d.getTime())) return null;
-  d.setDate(d.getDate() + days);
-  return d; // return Date object in local time context
-}
-
 function timeAgo(iso) {
   if (!iso) return null;
+  const thenDate = toValidDate(iso);
+  if (!thenDate) return null;
   const now = Date.now();
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return null;
+  const then = thenDate.getTime();
   const diff = Math.max(0, now - then);
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return "just now";
@@ -95,6 +223,42 @@ function prettyStatus(m) {
   if (s === "cancelled") return "Cancelled";
   if (s === "expired") return "Expired";
   return m.status || "Unknown";
+}
+
+function membershipStatusMeta(statusRaw) {
+  const s = String(statusRaw || "").trim().toLowerCase();
+
+  if (s === "active") {
+    return { text: "text-green-300", pill: "bg-green-900/30 text-green-300 border-green-700" };
+  }
+  if (s === "past_due") {
+    return { text: "text-orange-300", pill: "bg-orange-900/30 text-orange-300 border-orange-700" };
+  }
+  if (s === "suspended") {
+    return { text: "text-orange-300", pill: "bg-orange-900/30 text-orange-300 border-orange-700" };
+  }
+  if (s === "scheduled") {
+    return { text: "text-blue-300", pill: "bg-blue-900/30 text-blue-300 border-blue-700" };
+  }
+  if (s === "cancelled" || s === "canceled" || s === "expired") {
+    return { text: "text-yellow-300", pill: "bg-yellow-900/30 text-yellow-200 border-yellow-700" };
+  }
+  return { text: "text-gray-300", pill: "bg-gray-800 text-gray-300 border-gray-700" };
+}
+
+function MembershipStatus({ membership, variant = "text" }) {
+  const label = prettyStatus(membership);
+  const meta = membershipStatusMeta(membership?.status);
+
+  if (variant === "pill") {
+    return (
+      <span className={cls("text-xs px-2 py-0.5 rounded border", meta.pill)}>
+        {label}
+      </span>
+    );
+  }
+
+  return <div className={meta.text}>{label}</div>;
 }
 
 // Guest-pass status → colored pill
@@ -130,8 +294,8 @@ function sortMembershipsByStatusThenDate(rows = []) {
     if (ra !== rb) return ra - rb;
 
     // tie-breaker: newest start_date first (fallback created_at)
-    const ad = new Date(a.start_date || 0);
-    const bd = new Date(b.start_date || 0);
+    const ad = toValidDate(a.start_date) || new Date(0);
+    const bd = toValidDate(b.start_date) || new Date(0);
     return bd - ad;
   });
 }
@@ -147,16 +311,13 @@ function planLabelFor(m, pdMap) {
 }
 
 function diffDays(startISO, endISO) {
-  if (!startISO || !endISO) return null;
+  const startD = toValidDate(startISO);
+  const endD = toValidDate(endISO);
+  if (!startD || !endD) return null;
 
-  const start = new Date(startISO).getTime();
-  const end = new Date(endISO).getTime();
-  if (Number.isNaN(start) || Number.isNaN(end)) return null;
-
-  const ms = Math.max(0, end - start);
+  const ms = Math.max(0, endD.getTime() - startD.getTime());
   const day = 1000 * 60 * 60 * 24;
 
-  // ceil = "how many calendar days worth of time is this pass valid for"
   return Math.max(1, Math.ceil(ms / day));
 }
 
@@ -205,6 +366,33 @@ function getEffectivePriceForSelection(pd, priceMap) {
   return null;
 }
 
+function formatStripeMoney(amount_cents, currency = "USD") {
+  if (amount_cents == null) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: (currency || "USD").toUpperCase(),
+  }).format(amount_cents / 100);
+}
+
+// Returns { formatted, amount_cents, currency, source } or null
+function getFormattedPriceForPD(pd, priceMap) {
+  const eff = getEffectivePriceForSelection(pd, priceMap);
+  if (!eff || eff.amount_cents == null) return null;
+  return {
+    ...eff,
+    formatted: formatStripeMoney(eff.amount_cents, eff.currency || "USD"),
+  };
+}
+
+function isTierStillActive(until) {
+  if (!until) return true;
+
+  const untilDate = toValidDate(until);
+  if (!untilDate) return false;
+
+  return untilDate.getTime() >= new Date(getNowUtcIso()).getTime();
+}
+
 function isUuid(v = "") {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     String(v).trim()
@@ -213,18 +401,19 @@ function isUuid(v = "") {
 
 async function postAdminJson(url, body) {
   const token = await getAdminTokenOrThrow();
+
   const resp = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(body || {}),
   });
 
   const payload = await resp.json().catch(() => ({}));
   if (!resp.ok || payload?.ok === false) {
-    throw new Error(payload?.error || "Request failed.");
+    throw new Error(payload?.error || `Request failed (${resp.status})`);
   }
   return payload;
 }
@@ -234,6 +423,34 @@ async function getAdminTokenOrThrow() {
   const token = session?.access_token;
   if (!token) throw new Error("Missing admin session token.");
   return token;
+}
+
+async function runStripeAudit() {
+  try {
+    // NOTE: only include Authorization header if your route checks it.
+    const token = await getAdminTokenOrThrow();
+
+    const resp = await fetch("/api/admin/stripe/audit-prices", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    });
+
+    const payload = await resp.json().catch(() => ({}));
+    if (!resp.ok || payload?.ok === false) {
+      throw new Error(payload?.error || `Audit failed (${resp.status})`);
+    }
+
+    // easiest way to inspect quickly
+    console.table(payload.invalid || []);
+    showSuccess(`Stripe audit OK. Invalid: ${payload?.totals?.invalid ?? 0}`);
+  } catch (e) {
+    console.error("Stripe audit error:", e);
+    showError(e.message || "Stripe audit failed.");
+  }
 }
 
 const CustomerPage = () => {
@@ -272,6 +489,7 @@ const CustomerPage = () => {
   const [activating, setActivating] = useState(false);
   const [planDurationPriceRows, setPlanDurationPriceRows] = useState([]); // rows from plan_duration_prices
   const [priceMap, setPriceMap] = useState({}); // { [planDurationId]: { amount_cents, currency } }
+  const [priceSourceMap, setPriceSourceMap] = useState({}); // { [planDurationId]: { requestedTier, usedTier, isFallback } }
   const [priceTierOverride, setPriceTierOverride] = useState(null); // null | "standard" | "legacy" | "staff" | "family"
   const [planFilter, setPlanFilter] = useState(""); // (Optional) tiny text filter state
   const [household, setHousehold] = useState(null);
@@ -285,7 +503,6 @@ const CustomerPage = () => {
   const [savingPifAction, setSavingPifAction] = useState(false);
   const [pifActionNote, setPifActionNote] = useState("");
   const [joinHouseholdId, setJoinHouseholdId] = useState("");
-  const [joiningHousehold, setJoiningHousehold] = useState(false);
   const [billingOwnerUser, setBillingOwnerUser] = useState(null);
   const [showRemoveHouseholdModal, setShowRemoveHouseholdModal] = useState(false);
   const [removingFromHousehold, setRemovingFromHousehold] = useState(false);
@@ -380,37 +597,10 @@ const CustomerPage = () => {
       setError(null);
       try {
         const [u, m, gp, p, c, pr, hm] = await Promise.all([
-          supabase
-            .from("users")
-            .select("id, customer_no, full_name, email, phone, role, created_at, onboarded, pricing_tier, pricing_tier_until")
-            .eq("id", user_id)
-            .single(),
-
-          supabase
-            .from("memberships")
-            .select(`
-              id, 
-              plan_duration_id, 
-              status, 
-              start_date, 
-              expires_at, 
-              auto_renewal_enabled,
-              household_id,
-              pif_end_action,
-              pif_end_choice_set_at
-            `)
-            .eq("user_id", user_id)
-            .order("start_date", { ascending: false }),
-
-          supabase
-            .from("guest_passes")
-            .select("*")
-            .eq("user_id", user_id),
-
-          supabase
-            .from("payments")
-            .select("*")
-            .eq("user_id", user_id),
+          fetchAdminCustomerById(supabase, user_id),
+          fetchMembershipsForUser(supabase, user_id),
+          fetchGuestPassesForUserClient(user_id),
+          fetchPaymentsForUserClient(user_id),
 
           supabase
             .from("checkins")
@@ -421,7 +611,8 @@ const CustomerPage = () => {
 
           supabase
             .from("plan_duration_prices")
-            .select("id, plan_duration_id, tier, stripe_price_id, is_active"),
+            .select("id, plan_duration_id, tier, stripe_price_id, is_active")
+            .eq("is_active", true),
 
           supabase
             .from("household_members")
@@ -450,10 +641,6 @@ const CustomerPage = () => {
             .limit(1),
         ]);
 
-        if (u.error) throw u.error;
-        if (m.error) throw m.error;
-        if (gp.error) throw gp.error;
-        if (p.error) throw p.error;
         if (c.error) throw c.error;
         if (pr.error) throw pr.error;
         if (hm.error) throw hm.error;
@@ -461,18 +648,20 @@ const CustomerPage = () => {
         if (cancelled) return;
 
         // sort payments from newest to oldest
-        const paymentsSorted = (p.data || []).slice().sort(
+        const paymentsSorted = (p || []).slice().sort(
           (a, b) =>
-            new Date(b.payment_date || b.created_at || 0) -
-            new Date(a.payment_date || a.created_at || 0)
+            (toValidDate(b.payment_date || b.created_at) || new Date(0)) -
+            (toValidDate(a.payment_date || a.created_at) || new Date(0))
         );
 
         // sort memberships by status then date
-        const membershipsSorted = sortMembershipsByStatusThenDate(m.data || []);
+        const membershipsSorted = sortMembershipsByStatusThenDate(m || []);
 
         // sort guest passes newest to oldest
-        const guestPassesSorted = (gp.data || []).slice().sort(
-          (a, b) => new Date(b.start_date || 0) - new Date(a.start_date || 0)
+        const guestPassesSorted = (gp || []).slice().sort(
+          (a, b) => 
+            (toValidDate(b.start_date) || new Date(0)) - 
+            (toValidDate(a.start_date) || new Date(0))
         );
 
         const checkinsSorted = (c.data || []);
@@ -480,7 +669,7 @@ const CustomerPage = () => {
         // 🆕 take the most recent household_members row for this user
         const hmRow = hm.data?.[0] || null;
 
-        setUser(u.data || null);
+        setUser(u || null);
         setMemberships(membershipsSorted);
         setGuestPasses(guestPassesSorted);
         setPayments(paymentsSorted);
@@ -552,13 +741,7 @@ const CustomerPage = () => {
       }
 
       try {
-        const { data, error } = await supabase
-          .from("users")
-          .select("id, full_name, email")
-          .eq("id", boId)
-          .single();
-
-        if (error) throw error;
+        const data = await fetchUserBasicIdentityById(supabase, boId);
         if (!cancelled) setBillingOwnerUser(data || null);
       } catch (e) {
         console.error("Failed to load billing owner user", e);
@@ -582,32 +765,22 @@ const CustomerPage = () => {
     (async () => {
       setLoadingPlans(true);
       try {
-        const { data, error } = await supabase
-          .from("plan_durations")
-          .select(`
-            id,
-            plan_name,
-            duration_label,
-            requires_contract,
-            duration_in_days,
-            duration_in_months,
-            is_promotional,
-            paid_in_full_price,
-            discounted_renewal_price
-          `)
-          .order("plan_name", { ascending: true })
-          .order("duration_label", { ascending: true });
-        if (error) throw error;
+        const data = await fetchAllPlanDurationsClient();
+
         if (!cancelled) {
           const cleaned = (data || []).filter((pd) => {
             const isGuest = /guest\s*-?\s*pass/i.test(pd.plan_name || "");
             return !isGuest;
           });
+
           setPlanDurations(cleaned);
-          console.table((cleaned || []).map(pd => ({
-            plan_name: (pd.plan_name || "").trim(),
-            duration_label: pd.duration_label
-          })));
+
+          console.table(
+            (cleaned || []).map((pd) => ({
+              plan_name: (pd.plan_name || "").trim(),
+              duration_label: pd.duration_label,
+            }))
+          );
         }
       } catch (e) {
         console.error(e);
@@ -616,7 +789,10 @@ const CustomerPage = () => {
         if (!cancelled) setLoadingPlans(false);
       }
     })();
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -639,6 +815,27 @@ const CustomerPage = () => {
 
   // Pick the active membership first (used for prefill + summary and status badge)
   const currentActive = useMemo(() => activeMembership(memberships), [memberships]);
+  const latestMembershipRow = useMemo(() => latestMembership(memberships), [memberships]);
+
+  const displayMembership = currentActive || latestMembershipRow;
+
+  // 🔎 DEV-ONLY: sanity check memberships shape + ordering
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    
+    console.log("memberships isArray?", Array.isArray(memberships), "count:", memberships.length);
+    console.table(
+      (memberships || []).slice(0, 5).map((m) => ({
+        id: m?.id,
+        status: m?.status,
+        start_date: m?.start_date,
+        expires_at: m?.expires_at,
+        grace_ends_at: m?.grace_ends_at,
+        plan_duration_id: m?.plan_duration_id,
+      }))
+    );
+    console.log("currentActive:", currentActive?.id, currentActive?.status, currentActive?.start_date);
+  }, [memberships, currentActive]);
 
   // 🔍 Is the current active membership a PIF plan AND part of a household?
   const inHouseholdPIF = useMemo(() => {
@@ -661,8 +858,6 @@ const CustomerPage = () => {
     (currentActive.pif_end_action || "none") === "none";
   
   // derived - unified status (membership outranks guest)
-  const hasAnyMembership = memberships.length > 0;
-  
   const hasAnyGuest = guestPasses.length > 0;
   const hasActiveGuest = guestPasses.some((g) => {
     const s = (g.status || "").toLowerCase();
@@ -672,8 +867,8 @@ const CustomerPage = () => {
   // Build top-level status label and a matching badge class
   const { statusLabel, statusClass } = useMemo(() => {
     // Membership wins
-    if (currentActive) {
-      const ps = prettyStatus(currentActive); // "Active", "Past Due", "Suspended", etc.
+    if (displayMembership) {
+      const ps = prettyStatus(displayMembership);
       let badgeCls = "bg-gray-800 text-gray-300 border-gray-700";
       if (ps === "Active") {
         badgeCls = "bg-green-900/40 text-green-300 border-green-700";
@@ -687,13 +882,6 @@ const CustomerPage = () => {
       return { statusLabel: `${ps} · membership`, statusClass: badgeCls };
     }
   
-    // Otherwise fall back to guest / any-membership states
-    if (hasAnyMembership) {
-      return {
-        statusLabel: "Expired · membership",
-        statusClass: "bg-yellow-900/30 text-yellow-200 border-yellow-700",
-      };
-    }
     if (hasActiveGuest) {
       return {
         statusLabel: "Active · guest pass",
@@ -707,12 +895,19 @@ const CustomerPage = () => {
       };
     }
     return { statusLabel: "None", statusClass: "bg-gray-800 text-gray-300 border-gray-700" };
-  }, [currentActive, hasAnyMembership, hasActiveGuest, hasAnyGuest]);
+  }, [displayMembership, hasActiveGuest, hasAnyGuest]);
 
   const firstMembershipStart = useMemo(() => {
     const all = memberships.map((m) => m.start_date).filter(Boolean);
     if (all.length === 0) return null;
-    return all.reduce((min, v) => (new Date(v) < new Date(min) ? v : min), all[0]);
+    
+    return all.reduce((min, v) => {
+      const dv = toValidDate(v);
+      const dmin = toValidDate(min);
+      if (!dv) return min;
+      if (!dmin) return v;
+      return dv < dmin ? v : min;
+    }, all[0]);
   }, [memberships]);
 
   const ltvCents = useMemo(() => {
@@ -747,22 +942,17 @@ const CustomerPage = () => {
     // 2) User tier if active + valid
     const t = user?.pricing_tier || null;
     const until = user?.pricing_tier_until || null;
-    const nowIso = new Date().toISOString();
 
     if (t && allowed.has(t)) {
-      const active = !until || until >= nowIso;
-      if (active) return t;
+      if (isTierStillActive(until)) return t;
     }
 
     // 3) Household rule: if still standard and in a household, treat as family
     if (!priceTierOverride) {
       const t = user?.pricing_tier || null;
       const until = user?.pricing_tier_until || null;
-      const nowIso = new Date().toISOString();
-    
-      // what tier would we have picked so far?
       const candidate =
-        (t && allowed.has(t) && (!until || until >= nowIso)) ? t : "standard";
+        t && allowed.has(t) && isTierStillActive(until) ? t : "standard";
     
       if (candidate === "standard" && household?.id) return "family";
     }
@@ -830,24 +1020,8 @@ const CustomerPage = () => {
       setShowRemoveHouseholdModal(false);
 
       // Refresh memberships (household flags may change)
-      const { data, error } = await supabase
-        .from("memberships")
-        .select(`
-          id, 
-          plan_duration_id, 
-          status, 
-          start_date, 
-          expires_at, 
-          auto_renewal_enabled,
-          household_id,
-          pif_end_action,
-          pif_end_choice_set_at
-        `)
-        .eq("user_id", user_id)
-        .order("start_date", { ascending: false });
-
-      if (error) throw error;
-      setMemberships(sortMembershipsByStatusThenDate(data || []));
+      const rows = await fetchMembershipsForUser(supabase, user_id);
+      setMemberships(sortMembershipsByStatusThenDate(rows));
     } catch (e) {
       console.error("Remove from household error:", e);
       showError(e.message || "Could not remove from household.");
@@ -938,53 +1112,15 @@ const CustomerPage = () => {
 
     setClearing(true);
     try {
-      const res = await fetch("/api/memberships/clear-overrides", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ membershipId: target.id }),
+      const payload = await postAdminJson("/api/admin/memberships/clear-overrides", {
+        membershipId: target.id,
       });
-
-      // parse JSON safely
-      let payload = null;
-      try {
-        payload = await res.json();
-      } catch {
-        const text = await res.text().catch(() => "");
-        payload = { ok: res.ok, error: text || "Unknown error" };
-      }
-
-      if (!res.ok || payload?.ok === false) {
-        const msg =
-          payload?.error ||
-          (res.status === 404
-            ? "Membership not found."
-            : res.status === 400
-            ? "No membershipId provided."
-            : "Failed to clear overrides.");
-        throw new Error(msg);
-      }
 
       showSuccess(payload?.note || "Overrides cleared.");
 
       // Refetch memberships
-      const { data, error } = await supabase
-        .from("memberships")
-        .select(`
-          id, 
-          plan_duration_id, 
-          status, 
-          start_date, 
-          expires_at, 
-          auto_renewal_enabled,
-          household_id,
-          pif_end_action,
-          pif_end_choice_set_at
-          `)
-        .eq("user_id", user_id)
-        .order("start_date", { ascending: false });
-
-      if (error) throw error;
-      setMemberships(sortMembershipsByStatusThenDate(data || []));
+      const rows = await fetchMembershipsForUser(supabase, user_id);
+      setMemberships(sortMembershipsByStatusThenDate(rows));
     } catch (e) {
       console.error(e);
       showError(e.message || "Failed to clear overrides.");
@@ -1016,7 +1152,7 @@ const CustomerPage = () => {
     if (eff?.amount_cents != null) {
       setManualAmount((eff.amount_cents / 100).toFixed(2));
     }
-  }, [selectedPlanDuration, discountedRenewal, priceMap]); // still ignoring manualAmount on purpose
+  }, [selectedPlanDuration, priceMap]); // still ignoring manualAmount on purpose
 
   // Build { planDurationId -> { amount_cents, currency } } using plan_duration_prices + Stripe
   useEffect(() => {
@@ -1033,40 +1169,53 @@ const CustomerPage = () => {
         console.warn("Invalid effectivePriceTier, forcing standard:", effectivePriceTier);
       }
 
-      const variantForLookup =
-        (discountedRenewal && isPIFSelected) ? "discounted_renewal" : "base";
-
       // 1) Build plan_duration_id -> stripe_price_id for the active tier (fallback standard)
       const byTier = new Map(); // key: `${plan_duration_id}|||${tier}` -> stripe_price_id
       for (const row of planDurationPriceRows) {
         if (!row?.stripe_price_id) continue;
         if (row?.is_active === false) continue;
-
-        const key = `${row.plan_duration_id}|||${row.tier}|||${row.variant || "base"}`;
+      
+        const key = `${row.plan_duration_id}|||${row.tier}`;
         byTier.set(key, row.stripe_price_id);
       }
 
       // 2) Choose price_id per plan_duration_id using tierForLookup, fallback to standard
       const pdToPriceId = {};
+      const pdToSource = {};
       const priceIds = [];
-
+          
       for (const pd of planDurations) {
         const id = pd.id;
       
-        const k1 = `${id}|||${tierForLookup}|||${variantForLookup}`;
-        const k2 = `${id}|||standard|||${variantForLookup}`;
-        const k3 = `${id}|||${tierForLookup}|||base`;
-        const k4 = `${id}|||standard|||base`;
+        const k1 = `${id}|||${tierForLookup}`;
+        const k2 = `${id}|||standard`;
       
-        const priceId = byTier.get(k1) || byTier.get(k2) || byTier.get(k3) || byTier.get(k4);
-        if (!priceId) continue;
+        const tierPriceId = byTier.get(k1);
+        const standardPriceId = byTier.get(k2);
+      
+        const usedTier = tierPriceId ? tierForLookup : (standardPriceId ? "standard" : null);
+        const priceId = tierPriceId || standardPriceId;
+      
+        if (!priceId || !usedTier) continue;
       
         pdToPriceId[id] = priceId;
+        pdToSource[id] = {
+          requestedTier: tierForLookup,
+          usedTier,
+          isFallback: usedTier !== tierForLookup,
+        };
+      
         priceIds.push(priceId);
       }
 
       const uniquePriceIds = Array.from(new Set(priceIds));
-      if (!uniquePriceIds.length) return;
+      if (!uniquePriceIds.length) {
+        if (!cancelled) {
+          setPriceMap({});
+          setPriceSourceMap({});
+        }
+        return;
+      }
 
       // 3) Ask server to fetch Stripe price objects for these price_ids
       try {
@@ -1100,7 +1249,10 @@ const CustomerPage = () => {
           };
         }
 
-        if (!cancelled) setPriceMap(nextMap);
+        if (!cancelled) {
+          setPriceMap(nextMap);
+          setPriceSourceMap(pdToSource);
+        }
       } catch (e) {
         console.error("Error loading Stripe prices:", e);
       }
@@ -1111,7 +1263,7 @@ const CustomerPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [planDurations, planDurationPriceRows, effectivePriceTier, discountedRenewal]);
+  }, [planDurations, planDurationPriceRows, effectivePriceTier]);
 
   // ---- CLEAN DROPDOWN HELPERS (Monthly-first fix) ----
 
@@ -1119,19 +1271,31 @@ const CustomerPage = () => {
   const PLAN_ORDER = ["Standard", "Ultimate", "Professional"];
 
   function planOrderIndex(name = "") {
-    const i = PLAN_ORDER.findIndex(p => p.toLowerCase() === name.toLowerCase());
+    const i = PLAN_ORDER.findIndex((p) => p.toLowerCase() === String(name).toLowerCase());
     return i === -1 ? 999 : i;
   }
 
-  // Normalizer and Monthly detectors
-  const MONTHLY_RE = /\bmonthly\b/i;
+  // Normalizer
   const norm = (s = "") => String(s).trim();
 
-  const isMonthlyItem = (x) =>
-    x?.duration_in_months === 1 || MONTHLY_RE.test(x?.duration_label || "");
+  // Detect "Monthly" duration rows
+  const isMonthlyItem = (x) => {
+    // best signal: explicit months column
+    if (x?.duration_in_months != null) return Number(x.duration_in_months) === 1;
 
-  const isMonthlyGroup = (name, items = []) =>
-    MONTHLY_RE.test(norm(name)) || items.some(isMonthlyItem);
+    // fallback: if it's roughly a month in days
+    if (x?.duration_in_days != null) {
+      const d = Number(x.duration_in_days);
+      return d >= 28 && d <= 31;
+    }
+
+    // last-resort fallback: label contains monthly
+    const label = String(x?.duration_label || "").toLowerCase();
+    return label.includes("month") && label.includes("ly"); // "monthly"
+  };
+
+  // Does a plan group contain a monthly option?
+  const isMonthlyGroup = (_name, items = []) => items.some(isMonthlyItem);
 
   // Sort durations within a plan
   function sortDurations(a, b) {
@@ -1139,76 +1303,86 @@ const CustomerPage = () => {
     const amon = isMonthlyItem(a);
     const bmon = isMonthlyItem(b);
     if (amon !== bmon) return amon ? -1 : 1;
-  
+
     // 2) Then contract-required before non-contract
     const aContract = !!a.requires_contract;
     const bContract = !!b.requires_contract;
     if (aContract !== bContract) return aContract ? -1 : 1;
-  
+
     // 3) Then by duration (months, then days)
     const am = a.duration_in_months ?? 0;
     const bm = b.duration_in_months ?? 0;
     if (am !== bm) return am - bm;
-  
+
     const ad = a.duration_in_days ?? 0;
     const bd = b.duration_in_days ?? 0;
     if (ad !== bd) return ad - bd;
-  
+
     // 4) Stable fallback by label
-    return (a.duration_label || "").localeCompare(b.duration_label || "");
+    return String(a.duration_label || "").localeCompare(String(b.duration_label || ""));
   }
 
-  // Group and sort plans (Monthly group always first)
+  // Group and sort plans (any plan group with Monthly shows first)
   const groupedPlans = useMemo(() => {
     const groups = new Map();
+
     for (const pd of planDurations) {
       const key = norm(pd.plan_name || "Other");
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(pd);
     }
 
+    // sort durations inside each plan
     for (const arr of groups.values()) arr.sort(sortDurations);
 
-    const arr = Array.from(groups.entries())
+    // sort plan groups
+    return Array.from(groups.entries())
       .sort((a, b) => {
         const [an, aItems] = a;
         const [bn, bItems] = b;
 
+        // 1) Any plan containing "Monthly" duration group goes first
         const aMonthly = isMonthlyGroup(an, aItems);
         const bMonthly = isMonthlyGroup(bn, bItems);
         if (aMonthly !== bMonthly) return aMonthly ? -1 : 1;
 
+        // 2) Then follow your preferred plan order
         const ai = planOrderIndex(an);
         const bi = planOrderIndex(bn);
         if (ai !== bi) return ai - bi;
 
+        // 3) Otherwise alpha
         return an.localeCompare(bn);
       })
       .map(([name, items]) => ({ name, items }));
-
-    return arr;
   }, [planDurations]);
 
   const filteredGroups = useMemo(() => {
     const q = planFilter.trim().toLowerCase();
     if (!q) return groupedPlans;
+
     return groupedPlans
-      .map(g => ({
+      .map((g) => ({
         name: g.name,
-        items: g.items.filter(pd =>
-          (pd.plan_name || "").toLowerCase().includes(q) ||
-          (pd.duration_label || "").toLowerCase().includes(q)
-        )
+        items: g.items.filter((pd) => {
+          const pn = String(pd.plan_name || "").toLowerCase();
+          const dl = String(pd.duration_label || "").toLowerCase();
+          return pn.includes(q) || dl.includes(q);
+        }),
       }))
-      .filter(g => g.items.length > 0);
+      .filter((g) => g.items.length > 0);
   }, [groupedPlans, planFilter]);
 
   // 🔍 Is the currently selected plan a Paid-In-Full (PIF) style plan?
   const isPIFSelected = useMemo(() => {
-    if (!selectedPlanDuration) return false;
-    // fabricate a membership-like object if helper expects one, or add a helper for PD rows
-    return /paid\s*in\s*full/i.test(selectedPlanDuration.duration_label || "");
+    return !!selectedPlanDuration?.is_paid_in_full;
   }, [selectedPlanDuration]);
+
+  const failedPayments = useMemo(() => {
+    return payments.filter((p) => normalizeStatus(p.status) === "failed");
+  }, [payments]);
+
+  const latestFailedPayment = failedPayments.length ? failedPayments[0] : null;
 
   useEffect(() => {
     if (!isPIFSelected && discountedRenewal) {
@@ -1343,11 +1517,38 @@ const CustomerPage = () => {
             </span>
             {firstMembershipStart && (
               <span className="text-xs px-2 py-1 rounded bg-gray-800 text-gray-300 border border-gray-700">
-                Member since: {new Date(firstMembershipStart).toLocaleDateString()}
+                Member since: {formatAdminDate(firstMembershipStart)}
               </span>
             )}
           </div>
         </div>
+
+        {latestFailedPayment && (
+          <div className="mb-4 rounded-lg border border-red-500/70 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="font-semibold">Failed payment detected</div>
+                <div className="mt-1 text-red-100/80">
+                  {formatAdminDateTime(latestFailedPayment.payment_date || latestFailedPayment.created_at)}{" "}
+                  • {money(getPaymentCents(latestFailedPayment), (latestFailedPayment.currency || "USD").toUpperCase())}
+                  {" "}• {latestFailedPayment.method || "—"}
+                </div>
+                {latestFailedPayment.description && (
+                  <div className="mt-1 text-xs text-red-100/70">
+                    {latestFailedPayment.description}
+                  </div>
+                )}
+              </div>
+              
+              <button
+                className="shrink-0 text-xs px-3 py-1.5 rounded bg-red-900/20 border border-red-600 text-red-100 hover:bg-red-900/30"
+                onClick={() => setTab("payments")}
+              >
+                View payments
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Actions */}
         <div className="flex flex-wrap gap-2">
@@ -1397,7 +1598,7 @@ const CustomerPage = () => {
           <div className="flex justify-between sm:block">
             <div className="text-gray-400">Created</div>
             <div className="text-gray-200">
-              {user?.created_at ? new Date(user.created_at).toLocaleString() : "—"}
+              {formatAdminDateTime(user?.created_at)}
             </div>
           </div>
           <div className="flex justify-between sm:block">
@@ -1599,7 +1800,7 @@ const CustomerPage = () => {
             being part of a household. Their PIF term ends on{" "}
             <span className="font-semibold">
               {currentActive?.expires_at
-                ? new Date(currentActive.expires_at).toLocaleDateString()
+                ? formatAdminDate(currentActive.expires_at)
                 : "—"}
             </span>.
           </p>
@@ -1614,22 +1815,12 @@ const CustomerPage = () => {
       {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <Stat label="Lifetime value" value={money(ltvCents)} />
-        <Stat
-          label="Last payment"
-          value={
-            lastPaymentAt
-              ? `${new Date(lastPaymentAt).toLocaleString()}  ·  ${timeAgo(lastPaymentAt)}`
-              : "—"
-          }
-        />
-        <Stat
-          label="Last check-in"
-          value={
-            lastCheckinAt
-              ? `${new Date(lastCheckinAt).toLocaleString()}  ·  ${timeAgo(lastCheckinAt)}`
-              : "—"
-          }
-        />
+        <Stat label="Last payment" value={
+          lastPaymentAt ? `${formatAdminDateTime(lastPaymentAt)} · ${timeAgo(lastPaymentAt)}` : "—"
+        } />
+        <Stat label="Last check-in" value={
+          lastCheckinAt ? `${formatAdminDateTime(lastCheckinAt)} · ${timeAgo(lastCheckinAt)}` : "—"
+        } />
         <Stat label="Active memberships" value={memberships.filter(m => (m.status || "").toLowerCase() === "active").length} />
       </div>
 
@@ -1666,24 +1857,19 @@ const CustomerPage = () => {
                         
                           <div className="text-gray-300">
                             <>
-                              {new Date(p.payment_date || p.created_at).toLocaleDateString()}
+                              {formatAdminDate(p.payment_date || p.created_at)}
                               {" · "}
                               <span className="text-xs px-1.5 py-0.5 rounded bg-gray-900 border border-gray-700">
                                 {(p.method || "—")}{p.provider ? `/${p.provider}` : ""}
                               </span>
                               {" · "}
+                              <PaymentStatus status={p.status} />
+                              {" · "}
                               <span className="text-xs text-gray-400">{timeAgo(p.payment_date || p.created_at)}</span>
                             </>
                             {renderLinkedWithBullet(p, membershipsById, guestPassesById, pdMap)}
                           </div>
-                        <div className={(p.status || "").toLowerCase() === "succeeded" ? "text-green-300" : "text-gray-400"}>
-                          {(() => {
-                            const cents = typeof p.amount_cents === "number"
-                              ? p.amount_cents
-                              : (p.amount != null ? Math.round(Number(p.amount) * 100) : null);
-                            return money(cents, p.currency || "USD");
-                          })()}
-                        </div>
+                        <PaymentAmount p={p} />
                       </div>
                     ))}
                   </div>
@@ -1700,18 +1886,12 @@ const CustomerPage = () => {
                     {memberships.slice(0, 6).map((m) => (
                       <div key={m.id} className="text-sm flex items-center justify-between">
                         <div className="text-gray-300">
-                          {planLabelFor(m,pdMap)}
+                          {planLabelFor(m, pdMap)}
                           <div className="text-xs text-gray-400">
-                            {m.start_date ? new Date(m.start_date).toLocaleDateString() : "—"} → {m.expires_at ? new Date(m.expires_at).toLocaleDateString() : "—"}
+                            {formatAdminDate(m.start_date)} → {formatAdminDate(m.expires_at)}
                           </div>
                         </div>
-                        <div className={
-                          (m.status || "") === "active" ? "text-green-300" :
-                          m.status === "suspended" ? "text-orange-300" :
-                          m.status === "cancelled" ? "text-yellow-300" : "text-gray-300"
-                        }>
-                          {prettyStatus(m)}
-                        </div>
+                        <MembershipStatus membership={m} variant="pill" />
                       </div>
                     ))}
                   </div>
@@ -1738,9 +1918,9 @@ const CustomerPage = () => {
                   {memberships.map((m) => (
                     <tr key={m.id}>
                       <td className="px-4 py-2">{planLabelFor(m, pdMap)}</td>
-                      <td className="px-4 py-2">{prettyStatus(m)}</td>
-                      <td className="px-4 py-2">{m.start_date ? new Date(m.start_date).toLocaleDateString() : "—"}</td>
-                      <td className="px-4 py-2">{m.expires_at ? new Date(m.expires_at).toLocaleDateString() : "—"}</td>
+                      <td className="px-4 py-2"><MembershipStatus membership={m} variant="pill" /></td>
+                      <td className="px-4 py-2">{formatAdminDate(m.start_date)}</td>
+                      <td className="px-4 py-2">{formatAdminDate(m.expires_at)}</td>
                       <td className="px-4 py-2">
                         {(() => {
                           const pd = m.plan_duration_id ? pdMap.get(m.plan_duration_id) : null;
@@ -1782,12 +1962,12 @@ const CustomerPage = () => {
                         </span>
                       </td>
                       <td className="px-4 py-2">
-                        {g.start_date ? new Date(g.start_date).toLocaleDateString() : "—"}
+                        {formatAdminDate(g.start_date)}
                       </td>
                       <td className="px-4 py-2">
                         {g.expires_at
-                          ? new Date(g.expires_at).toLocaleDateString()
-                          : (g.redeemed_on ? new Date(g.redeemed_on).toLocaleDateString() : "—")}
+                          ? formatAdminDate(g.expires_at)
+                          : (g.redeemed_on ? formatAdminDate(g.redeemed_on) : "—")}
                       </td>
                       <td className="px-4 py-2">
                         {g.location_id ? (locMap.get(g.location_id) || g.location_id) : "—"}
@@ -1813,6 +1993,7 @@ const CustomerPage = () => {
                     <th className="px-4 py-2">Method</th>
                     <th className="px-4 py-2">Linked To</th>
                     <th className="px-4 py-2">Description</th>
+                    <th className="px-4 py-2 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-700">
@@ -1820,30 +2001,47 @@ const CustomerPage = () => {
                     <tr key={p.id}>
                       <td className="px-4 py-2">
                         <div className="leading-tight">
-                          <div>{new Date(p.payment_date || p.created_at).toLocaleString()}</div>
+                          <div>{formatAdminDateTime(p.payment_date || p.created_at)}</div>
                           <div className="text-xs text-gray-400">{timeAgo(p.payment_date || p.created_at)}</div>
                         </div>
                       </td>
                       <td className="px-4 py-2">
-                        {(() => {
-                          const cents = typeof p.amount_cents === "number"
-                            ? p.amount_cents
-                            : (p.amount != null ? Math.round(Number(p.amount) * 100) : null);
-                            return money(cents, p.currency || "USD");
-                        })()}
+                        <PaymentAmount p={p} />
                       </td>
-                      <td className="px-4 py-2">{p.status}</td>
+                      <td className="px-4 py-2">
+                        <PaymentStatus status={p.status} />
+                      </td>
                       <td className="px-4 py-2">
                         {p.method || "—"}{p.provider ? `/${p.provider}` : ""}
                       </td>
                       <td className="px-4 py-2">
                         {renderLinkedTo(p, membershipsById, guestPassesById, pdMap)}
                       </td>
-                      <td className="px-4 py-2">{p.description || "—"}</td>
+                      <td className="px-4 py-2">
+                        <div className="text-sm">{p.description || "—"}</div>
+                                        
+                        {normalizeStatus(p.status) === "refunded" && (
+                          <div className="mt-1 text-xs text-orange-200/80 space-y-0.5">
+                            <div>Refunded by: {p.refunded_by_name || p.refunded_by || "—"}</div>
+                            <div>Reason: {p.refund_reason || "—"}</div>
+                            <div>Refunded at: {p.refunded_at ? formatAdminDateTime(p.refunded_at) : "—"}</div>
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        {normalizeStatus(p.status) === "failed" && (
+                          <button
+                            className="text-xs px-2 py-1 rounded bg-red-900/20 border border-red-700 text-red-200 hover:bg-red-900/30"
+                            onClick={() => showError("Retry not wired yet (next step).")}
+                          >
+                            Retry
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                   {payments.length === 0 && (
-                    <tr><td className="px-4 py-3 text-gray-400" colSpan={6}>No payments.</td></tr>
+                    <tr><td className="px-4 py-3 text-gray-400" colSpan={7}>No payments.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1865,7 +2063,7 @@ const CustomerPage = () => {
                   {checkins.map((c) => (
                     <tr key={c.id}>
                       <td className="px-4 py-2">
-                        {c.checkin_time ? new Date(c.checkin_time).toLocaleString() : "—"}
+                        {c.checkin_time ? formatAdminDateTime(c.checkin_time) : "—"}
                       </td>
                       <td className="px-4 py-2">
                         {c.location_id ? (locMap.get(c.location_id) || c.location_id) : "—"}
@@ -1914,11 +2112,17 @@ const CustomerPage = () => {
                   </div>
                   {currentActive ? (
                     <div className="text-xs text-gray-400">
-                      Ends: {currentActive.expires_at ? new Date(currentActive.expires_at).toLocaleString() : "—"}
+                      Ends: {formatAdminDateTime(currentActive.expires_at)}
                       {" · "}
-                      Grace ends: {currentActive.expires_at
-                        ? (addDaysLocal(currentActive.expires_at, 3)?.toLocaleString() ?? "—")
-                        : "—"}
+                      Grace ends: {
+                        currentActive.grace_ends_at
+                          ? formatAdminDateTime(currentActive.grace_ends_at)
+                          : currentActive.expires_at
+                            ? formatAdminDateTime(
+                                addDaysToUtcIso(currentActive.expires_at, MEMBERSHIP_GRACE_DAYS)
+                              )
+                            : "—"
+                      }
                     </div>
                   ) : (
                     <div className="text-xs text-gray-500">Choose a plan below to activate.</div>
@@ -2011,6 +2215,14 @@ const CustomerPage = () => {
                 >
                   Family
                 </button>
+
+                <button
+                  type="button"
+                  className="px-2 py-1 rounded border border-gray-700 bg-gray-800 hover:bg-gray-700"
+                  onClick={runStripeAudit}
+                >
+                  Audit Price IDs
+                </button>
               </div>
             </div>
 
@@ -2052,15 +2264,17 @@ const CustomerPage = () => {
                       <option
                         key={pd.id}
                         value={pd.id}
-                        title={
-                          // show more info in native tooltip without cluttering the label
-                          [
+                        title={(() => {
+                          const p = getFormattedPriceForPD(pd, priceMap);
+                          return [
                             pd.plan_name,
                             pd.duration_label,
                             pd.requires_contract ? "(requires contract)" : null,
-                            pd.paid_in_full_price != null ? `Price: $${Number(pd.paid_in_full_price).toFixed(2)}` : null
-                          ].filter(Boolean).join(" • ")
-                        }
+                            p?.formatted ? `Stripe: ${p.formatted}` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" • ");
+                        })()}
                       >
                         {pd.duration_label}
                         {pd.requires_contract ? " (contract)" : ""}
@@ -2074,23 +2288,12 @@ const CustomerPage = () => {
               {selectedPlanDuration && (
                 <div className="mt-2 text-sm text-gray-300 space-y-0.5">
                   {(() => {
-                    const eff = getEffectivePriceForSelection(selectedPlanDuration, priceMap);
-                    const formatted = eff?.amount_cents != null
-                      ? new Intl.NumberFormat("en-US", {
-                          style: "currency",
-                          currency: (eff.currency || "USD").toUpperCase(),
-                        }).format(eff.amount_cents / 100)
-                      : "—";
-                      
-                    const label =
-                      discountedRenewal && isPIFSelected
-                        ? "Discounted renewal price"
-                        : "Stripe price";
-                      
+                    const p = getFormattedPriceForPD(selectedPlanDuration, priceMap);
+                    const formatted = p?.formatted || "—";
                     return (
                       <>
                         <div>
-                          {label}:&nbsp;<span className="font-medium">{formatted}</span>
+                          Stripe price:&nbsp;<span className="font-medium">{formatted}</span>
                         </div>
                         <div className="text-xs text-gray-400">
                           {selectedPlanDuration.requires_contract ? "Requires contract." : "No contract required."}
@@ -2177,7 +2380,7 @@ const CustomerPage = () => {
                       >
                         {/* If you want literally only cash, delete the “other” option */}
                         <option value="cash">Cash</option>
-                        <option value="other">Other</option>
+                        <option value="card">Card</option>
                       </select>
                     </div>
                     <div>
@@ -2222,31 +2425,22 @@ const CustomerPage = () => {
                       amount_cents = Math.round(parseFloat(manualAmount) * 100);
                     }
                   
-                    const resp = await fetch("/api/admin/memberships/admin-activate", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        user_id,
-                        plan_duration_id: selectedPlanDuration.id,
-                        auto_renewal_enabled: !!autoRenew,
-                        renew_at_discounted_rate: !!discountedRenewal && isPIFSelected,
-                        source: "admin-manual",
-                        payment: recordPayment && amount_cents
-                          ? {
-                              amount_cents,
-                              currency: "USD",
-                              method: manualMethod, // "cash" | "other"
-                              provider: "manual",
-                              description: manualDesc || null,
-                            }
-                          : null,
-                      }),
+                    const payload = await postAdminJson("/api/admin/memberships/admin-activate", {
+                      user_id,
+                      plan_duration_id: selectedPlanDuration.id,
+                      auto_renewal_enabled: !!autoRenew,
+                      renew_at_discounted_rate: !!discountedRenewal && isPIFSelected,
+                      source: "admin-manual",
+                      payment: recordPayment && amount_cents
+                        ? {
+                            amount_cents,
+                            currency: "USD",
+                            method: manualMethod,
+                            provider: "manual",
+                            description: manualDesc || null,
+                          }
+                        : null,
                     });
-                  
-                    const payload = await resp.json().catch(() => ({}));
-                    if (!resp.ok || payload?.ok === false) {
-                      throw new Error(payload?.error || "Failed to manually activate.");
-                    }
                   
                     showSuccess(
                       payload?.payment_recorded
@@ -2256,38 +2450,18 @@ const CustomerPage = () => {
                     closeCreateModal();
                   
                     // refresh memberships + payments
-                    const [mRes, pRes] = await Promise.all([
-                      supabase
-                        .from("memberships")
-                        .select(`
-                          id, 
-                          plan_duration_id, 
-                          status, 
-                          start_date, 
-                          expires_at, 
-                          auto_renewal_enabled,
-                          household_id,
-                          pif_end_action,
-                          pif_end_choice_set_at
-                          `)
-                        .eq("user_id", user_id)
-                        .order("start_date", { ascending: false }),
-                      supabase
-                        .from("payments")
-                        .select("*")
-                        .eq("user_id", user_id)
+                    const [mRows, paymentRows] = await Promise.all([
+                      fetchMembershipsForUser(supabase, user_id),
+                      fetchPaymentsForUserClient(user_id),
                     ]);
-                  
-                    if (mRes.error) throw mRes.error;
-                    if (pRes.error) throw pRes.error;
-                  
-                    const paymentsSorted2 = (pRes.data || []).slice().sort(
+
+                    const paymentsSorted2 = (paymentRows || []).slice().sort(
                       (a, b) =>
-                        new Date(b.payment_date || b.created_at || 0) -
-                        new Date(a.payment_date || a.created_at || 0)
+                        (toValidDate(b.payment_date || b.created_at) || new Date(0)) -
+                        (toValidDate(a.payment_date || a.created_at) || new Date(0))
                     );
                   
-                    setMemberships(sortMembershipsByStatusThenDate(mRes.data || []));
+                    setMemberships(sortMembershipsByStatusThenDate(mRows));
                     setPayments(paymentsSorted2);
                   } catch (e) {
                     console.error(e);
@@ -2305,34 +2479,31 @@ const CustomerPage = () => {
                 onClick={async () => {
                   if (!selectedPlanDuration) return;
                 
-                  // If the selected duration requires a contract, route to your contract flow first.
                   if (selectedPlanDuration.requires_contract) {
-                    const url = `/contract?user_id=${encodeURIComponent(user_id)}&plan_duration_id=${encodeURIComponent(selectedPlanDuration.id)}&auto_renew=${autoRenew ? "1" : "0"}&discounted=${discountedRenewal ? "1" : "0"}&source=admin`;
+                    const url =
+                      `/contract?user_id=${encodeURIComponent(user_id)}` +
+                      `&plan_duration_id=${encodeURIComponent(selectedPlanDuration.id)}` +
+                      `&auto_renew=${autoRenew ? "1" : "0"}` +
+                      `&discounted=${discountedRenewal ? "1" : "0"}` +
+                      `&pricing_tier=${encodeURIComponent(effectivePriceTier)}` +
+                      (priceTierOverride ? `&pricing_tier_override=${encodeURIComponent(priceTierOverride)}` : "") +
+                      `&source=admin`;
                     window.location.href = url;
                     return;
                   }
                 
-                  // Otherwise go straight to Stripe Checkout using your existing API
                   try {
-                    const resp = await fetch("/api/create-stripe-session", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        user_id,
-                        plan_duration_id: selectedPlanDuration.id,
-                        auto_renewal_enabled: !!autoRenew,
-                        renew_at_discounted_rate: !!discountedRenewal && isPIFSelected,
-                        source: "admin",
-                        pricing_tier_override: priceTierOverride,
-                      }),
+                    const url = await createStripeSession({
+                      userId: user_id,
+                      planDurationId: selectedPlanDuration.id,
+                      requiresContract: false,
+                      autoRenewalEnabled: !!autoRenew,
+                      renewAtDiscountedRate: !!discountedRenewal && isPIFSelected,
+                      source: "admin",
+                      pricingTier: effectivePriceTier,
+                      pricingTierOverride: priceTierOverride, // ✅ now supported
                     });
                   
-                    if (!resp.ok) {
-                      const t = await resp.text().catch(() => "");
-                      throw new Error(t || "Failed to create Stripe session");
-                    }
-                  
-                    const { url } = await resp.json();
                     if (!url) throw new Error("Missing checkout URL.");
                     window.location.href = url;
                   } catch (e) {
@@ -2427,33 +2598,23 @@ const CustomerPage = () => {
                   if (issuing) return;
                   setIssuing(true);
                   try {
-                    const resp = await fetch("/api/admin/guest-passes/issue", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        user_id,
-                        duration_days: gpDuration,
-                        location_id: gpLocationId || null,
-                        is_promotional: !!gpIsPromo,
-                        pass_source: "admin",
-                      }),
+                    const payload = await postAdminJson("/api/admin/guest-passes/issue", {
+                      user_id,
+                      duration_days: gpDuration,
+                      location_id: gpLocationId || null,
+                      is_promotional: !!gpIsPromo,
+                      pass_source: "admin",
                     });
-                    const payload = await resp.json().catch(() => ({}));
-                    if (!resp.ok || payload?.ok === false) {
-                      throw new Error(payload?.error || "Failed to issue guest pass.");
-                    }
                   
                     showSuccess(`Guest pass issued (${gpDuration}-day).`);
                   
                     // Refresh guest passes
-                    const { data, error } = await supabase
-                      .from("guest_passes")
-                      .select("*")
-                      .eq("user_id", user_id);
-                    if (error) throw error;
-                  
+                    const data = await fetchGuestPassesForUserClient(user_id);
+
                     const sorted = (data || []).slice().sort(
-                      (a, b) => new Date(b.start_date || 0) - new Date(a.start_date || 0)
+                      (a, b) =>
+                        (toValidDate(b.start_date) || new Date(0)) -
+                        (toValidDate(a.start_date) || new Date(0))
                     );
                     setGuestPasses(sorted);
                     closeIssuePassModal();
@@ -2662,31 +2823,15 @@ const CustomerPage = () => {
                           ? {
                               ...h,
                               pif_end_action: pifEndAction,
-                              pif_end_choice_set_at: new Date().toISOString(),
+                              pif_end_choice_set_at: getNowUtcIso(),
                             }
                           : h
                       );
                     }
                   
                     // Refresh memberships too (so banner + UI stays consistent)
-                    const { data, error } = await supabase
-                      .from("memberships")
-                      .select(`
-                        id,
-                        plan_duration_id,
-                        status,
-                        start_date,
-                        expires_at,
-                        auto_renewal_enabled,
-                        household_id,
-                        pif_end_action,
-                        pif_end_choice_set_at
-                      `)
-                      .eq("user_id", user_id)
-                      .order("start_date", { ascending: false });
-                      
-                    if (error) throw error;
-                    setMemberships(sortMembershipsByStatusThenDate(data || []));
+                    const rows = await fetchMembershipsForUser(supabase, user_id);
+                    setMemberships(sortMembershipsByStatusThenDate(rows));
                       
                     setShowManageHouseholdModal(false);
                   } catch (e) {

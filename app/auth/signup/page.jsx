@@ -3,9 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { upsertUserClient } from "@/lib/queries/users.client";
 import { createStripeSession } from "@/lib/utils/stripeSession";
 import { groupPlanDurationsByName } from "@/lib/utils/planGrouping";
 import { showError, showSuccess, showLoading, dismissToast } from "@/lib/utils/toastUtils";
+import { fetchAllPlanDurationsClient } from "@/lib/queries/planDurations.client";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -36,15 +38,15 @@ export default function SignupPage() {
 
   useEffect(() => {
     const loadDurations = async () => {
-      const { data, error } = await supabase
-        .from("plan_durations")
-        .select("id, plan_name, duration_label, requires_contract, is_promotional");
-      if (error) {
+      try {
+        const data = await fetchAllPlanDurationsClient();
+        setPlansByName(groupPlanDurationsByName(data || []));
+      } catch (error) {
+        console.error(error);
         showError("Failed to load plans");
-        return;
       }
-      setPlansByName(groupPlanDurationsByName(data || []));
     };
+
     loadDurations();
   }, []);
 
@@ -82,17 +84,17 @@ export default function SignupPage() {
       if (!authUser?.id) throw new Error("Sign up succeeded but no user was returned.");
 
       // 2) Ensure row in public.users
-      const { error: upsertUserErr } = await supabase.from("users").upsert(
-        {
+      try {
+        await upsertUserClient({
           id: authUser.id,
           email,
           full_name: fullName,
           role: "member",
           onboarded: false, // new users start not onboarded
-        },
-        { onConflict: "id" }
-      );
-      if (upsertUserErr) throw upsertUserErr;
+        });
+      } catch (upsertUserErr) {
+        throw upsertUserErr;
+      }
 
       // 3) If the duration requires a contract, go to /contract first
       if (selectedDuration?.requires_contract) {

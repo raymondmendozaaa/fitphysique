@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { fetchUserByIdClient } from "@/lib/queries/users.client";
 
 export default function FinishClient() {
   const router = useRouter();
@@ -24,12 +25,8 @@ export default function FinishClient() {
           data: { user },
         } = await supabase.auth.getUser();
         if (!user) return; // user not authed yet, supabase will hydrate after hash parsed
-        const { data } = await supabase
-          .from("users")
-          .select("onboarded")
-          .eq("id", user.id)
-          .single();
-        router.replace(data?.onboarded ? "/member" : "/onboarding");
+        const userRow = await fetchUserByIdClient(user.id, "onboarded");
+        router.replace(userRow?.onboarded ? "/member" : "/onboarding");
       })();
     }
   }, [mode, router]);
@@ -45,13 +42,8 @@ export default function FinishClient() {
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      const { data } = await supabase
-        .from("users")
-        .select("onboarded")
-        .eq("id", user.id)
-        .single();
-
-      router.replace(next || (data?.onboarded ? "/member" : "/onboarding"));
+      const userRow = await fetchUserByIdClient(user.id, "onboarded");
+      router.replace(next || (userRow?.onboarded ? "/member" : "/onboarding"));
     } catch (err) {
       alert(err.message || "Failed to set password");
     } finally {

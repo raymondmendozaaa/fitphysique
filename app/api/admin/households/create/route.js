@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-
-// Service-role admin client (server-side only)
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { 
+  fetchUserRoleById, 
+  fetchUserHouseholdFieldsById, 
+  updateUserHouseholdFields 
+} from "@/lib/db/users";
+import { getNowUtcIso } from "@/lib/utils/dateTime";
 
 async function requireAdmin(req) {
   const authHeader = req.headers.get("authorization") || "";
@@ -22,13 +22,11 @@ async function requireAdmin(req) {
     return { ok: false, status: 401, error: "Invalid or expired token." };
   }
 
-  const { data: me, error: meErr } = await supabaseAdmin
-    .from("users")
-    .select("id, role")
-    .eq("id", auth.user.id)
-    .single();
+  let me = null;
 
-  if (meErr) {
+  try {
+    me = await fetchUserRoleById(supabaseAdmin, auth.user.id);
+  } catch {
     return { ok: false, status: 500, error: "Failed to verify admin role." };
   }
 
@@ -40,6 +38,10 @@ async function requireAdmin(req) {
 }
 
 export async function POST(req) {
+  if (process.env.VERCEL_ENV === "preview") {
+    return new Response("Admin API disabled in Preview", { status: 403 });
+  }
+  
   try {
     const gate = await requireAdmin(req);
     if (!gate.ok) {
@@ -56,14 +58,19 @@ export async function POST(req) {
     }
 
     // 1) Load the user (to get name + current household)
-    const { data: user, error: userErr } = await supabaseAdmin
-      .from("users")
-      .select("id, full_name, household_id, household_role")
-      .eq("id", user_id)
-      .single();
+    let user = null;
 
-    if (userErr) {
+    try {
+      user = await fetchUserHouseholdFieldsById(supabaseAdmin, user_id);
+    } catch (userErr) {
       console.error("load user error:", userErr);
+      return NextResponse.json(
+        { ok: false, error: "User not found." },
+        { status: 404 }
+      );
+    }
+
+    if (!user) {
       return NextResponse.json(
         { ok: false, error: "User not found." },
         { status: 404 }
@@ -101,6 +108,8 @@ export async function POST(req) {
       );
     }
 
+    const nowIso = getNowUtcIso();
+
     // 3) Add them to household_members as 'primary'
     const { data: hmRow, error: hmErr } = await supabaseAdmin
       .from("household_members")
@@ -108,6 +117,8 @@ export async function POST(req) {
         household_id: household.id,
         user_id: user.id,
         role: "primary",
+        started_at: nowIso,
+        is_active: true,
       })
       .select("*")
       .single();
@@ -132,13 +143,16 @@ export async function POST(req) {
     }
 
     // 4) Update the user shortcut fields
-    const { error: userUpdateErr } = await supabaseAdmin
-      .from("users")
-      .update({
+    let userUpdateErr = null;
+
+    try {
+      await updateUserHouseholdFields(supabaseAdmin, user.id, {
         household_id: household.id,
         household_role: "primary",
-      })
-      .eq("id", user.id);
+      });
+    } catch (err) {
+      userUpdateErr = err;
+    }
 
     if (userUpdateErr) {
       console.error("update user household error:", userUpdateErr);

@@ -24,6 +24,10 @@ function isStaff(role) {
 // --- Route: POST --------------------------------------------
 // Body: { userId, redirectTo? }
 export async function POST(req) {
+  if (process.env.VERCEL_ENV === "preview") {
+    return new Response("Admin API disabled in Preview", { status: 403 });
+  }
+
   try {
     const { userId, redirectTo = '/onboarding' } = await req.json();
     if (!userId) {

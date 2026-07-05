@@ -3,8 +3,8 @@
 import withAuth from "@/lib/withAuth";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { formatAdminDateTime, getNowUtcIso, toValidDate } from "@/lib/utils/dateTime";
+import { isMembershipAccessEligible } from "@/lib/db/memberships";
 
 const tabs = [
   { name: "Dashboard", href: "/admin" },
@@ -17,39 +17,84 @@ const tabs = [
   { name: "Payments", href: "/admin/payments" },
   { name: "Analytics", href: "/admin/analytics" },
   { name: "Settings", href: "/admin/settings" },
-];
+]; 
 
 const AdminPage = ({ user, role }) => {
-  const pathname = usePathname();
   const [metrics, setMetrics] = useState({
-    total: 0,
-    active: 0,
+    totalMembers: 0,
+    accessEligible: 0,
     expired: 0,
-    guestPass: 0,
-    promotional: 0,
+    guestPasses: 0,
+    activeGuestPasses: 0,
+    promotionalGuestPasses: 0,
   });
 
   useEffect(() => {
     const fetchMetrics = async () => {
-      const { data: allMembers, error } = await supabase
-        .from("memberships")
-        .select("status, pass_source, is_promotional, plan_durations(plan_name)");
+      const now = toValidDate(getNowUtcIso());
 
-      if (error) {
-        console.error("❌ Error fetching metrics:", error);
+      const [
+        { data: memberships, error: membershipsError },
+        { data: guestPasses, error: guestPassesError },
+      ] = await Promise.all([
+        supabase
+          .from("memberships")
+          .select("status, expires_at, grace_ends_at"),
+      
+        supabase
+          .from("guest_passes")
+          .select("status, expires_at, is_promotional"),
+      ]);
+    
+      if (membershipsError) {
+        console.error("❌ Error fetching membership metrics:", membershipsError);
         return;
       }
-
-      const total = allMembers.length;
-      const active = allMembers.filter((m) => m.status === "active").length;
-      const expired = allMembers.filter((m) => m.status === "expired").length;
-      const guestPass = allMembers.filter((m) =>
-        m.status === "active" &&
-        (m.plan_durations?.plan_name || "").toLowerCase().includes("guest pass")
+    
+      if (guestPassesError) {
+        console.error("❌ Error fetching guest pass metrics:", guestPassesError);
+        return;
+      }
+    
+      const membershipRows = memberships || [];
+      const guestPassRows = guestPasses || [];
+    
+      const totalMembers = membershipRows.length;
+    
+      const accessEligible = membershipRows.filter((m) =>
+        isMembershipAccessEligible(m, now)
       ).length;
-      const promotional = allMembers.filter((m) => m.is_promotional).length;
-
-      setMetrics({ total, active, expired, guestPass, promotional });
+    
+      const expired = membershipRows.filter(
+        (m) => String(m.status || "").toLowerCase() === "expired"
+      ).length;
+    
+      const guestPassesTotal = guestPassRows.length;
+    
+      const activeGuestPasses = guestPassRows.filter((g) => {
+        const status = String(g.status || "").toLowerCase();
+        const expiresAt = toValidDate(g.expires_at);
+      
+        return (
+          ["active", "issued"].includes(status) &&
+          expiresAt &&
+          now &&
+          expiresAt.getTime() > now.getTime()
+        );
+      }).length;
+    
+      const promotionalGuestPasses = guestPassRows.filter(
+        (g) => !!g.is_promotional
+      ).length;
+    
+      setMetrics({
+        totalMembers,
+        accessEligible,
+        expired,
+        guestPasses: guestPassesTotal,
+        activeGuestPasses,
+        promotionalGuestPasses,
+      });
     };
 
     fetchMetrics();
@@ -69,11 +114,12 @@ const AdminPage = ({ user, role }) => {
         <p>Manage memberships, payments, users, and more from this panel.</p>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-        <MetricCard label="Total Members" value={metrics.total} />
-        <MetricCard label="Active" value={metrics.active} />
-        <MetricCard label="Expired" value={metrics.expired} />
-        <MetricCard label="Guest Passes" value={metrics.guestPass} />
-        <MetricCard label="Promotional Passes" value={metrics.promotional} />
+        <MetricCard label="Total Memberships" value={metrics.totalMembers} />
+        <MetricCard label="Access Eligible" value={metrics.accessEligible} />
+        <MetricCard label="Expired Memberships" value={metrics.expired} />
+        <MetricCard label="Guest Passes" value={metrics.guestPasses} />
+        <MetricCard label="Active Guest Passes" value={metrics.activeGuestPasses} />
+        <MetricCard label="Promotional Guest Passes" value={metrics.promotionalGuestPasses} />
       </div>
 
       <div className="mt-10">
@@ -137,19 +183,62 @@ function RecentAdminActivityCard() {
     setLoading(false);
   }
 
+  async function downloadAuditCsv() {
+    try {
+      setLoading(true);
+
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      const res = await fetch("/api/admin/audit/export", {
+        method: "GET",
+        headers: {
+          ...(session?.access_token
+            ? { Authorization: `Bearer ${session.access_token}` }
+            : {}),
+        },
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload?.message || `Export failed (${res.status})`);
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "admin_audit_logs.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("❌ Failed to export admin activity:", e);
+      alert(e.message || "Failed to export admin activity.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => { load({}); }, []);
 
   return (
     <div className="bg-gray-800 border border-gray-700 rounded-2xl p-4 shadow">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold text-yellow-400">Recent Admin Activity</h2>
-        <a
-          href="/api/admin/audit/export"
-          className="text-xs text-blue-400 hover:underline"
+        <button
+          type="button"
+          onClick={downloadAuditCsv}
+          disabled={loading}
+          className="text-xs text-blue-400 hover:underline disabled:opacity-50"
           title="Download CSV (last 500)"
         >
           Export CSV
-        </a>
+        </button>
       </div>
 
       <div className="space-y-3">
@@ -158,7 +247,7 @@ function RecentAdminActivityCard() {
             <div className="flex flex-wrap justify-between gap-2 text-sm">
               <div>
                 <span className="text-gray-400">When:</span>{' '}
-                {new Date(r.created_at).toLocaleString()}
+                {formatAdminDateTime(r.created_at)}
               </div>
               <div>
                 <span className="text-gray-400">Action:</span> {r.action}

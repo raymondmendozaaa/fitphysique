@@ -10,8 +10,9 @@ import {
   showLoading,
   dismissToast,
 } from "@/lib/utils/toastUtils";
-import { supabase } from "@/lib/supabaseClient";
+import { fetchUserByIdClient } from "@/lib/queries/users.client";
 import { groupPlanDurationsByName } from "@/lib/utils/planGrouping";
+import { fetchAllPlanDurationsClient } from "@/lib/queries/planDurations.client";
 
 const MembershipChange = ({ user }) => {
   const router = useRouter();
@@ -27,15 +28,12 @@ const MembershipChange = ({ user }) => {
   // Load plan durations
   useEffect(() => {
     const fetchDurations = async () => {
-      const { data, error } = await supabase
-        .from("plan_durations")
-        .select("id, plan_name, duration_label, requires_contract");
-
-      if (error) {
+      try {
+        const data = await fetchAllPlanDurationsClient();
+        setPlansWithDurations(groupPlanDurationsByName(data || []));
+      } catch (error) {
         console.error("[MembershipChange] Failed to load durations:", error);
         showError("Failed to load plan durations");
-      } else {
-        setPlansWithDurations(groupPlanDurationsByName(data));
       }
     };
 
@@ -47,18 +45,15 @@ const MembershipChange = ({ user }) => {
     if (!user?.id) return;
 
     const fetchUserPrefs = async () => {
-      const { data, error } = await supabase
-        .from("users")
-        .select("preferred_location_id")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (error) {
+      try {
+        const data = await fetchUserByIdClient(
+          user.id,
+          "preferred_location_id"
+        );
+        setPreferredLocationId(data?.preferred_location_id || null);
+      } catch (error) {
         console.error("[MembershipChange] Failed to load user prefs:", error);
-        return;
       }
-
-      setPreferredLocationId(data?.preferred_location_id || null);
     };
 
     fetchUserPrefs();
@@ -77,52 +72,42 @@ const MembershipChange = ({ user }) => {
     );
     setSelectedDurationId(durationId);
     setSelectedDuration(duration);
-
-    if (duration?.requires_contract) {
-      showSuccess("Note: This duration requires a contract.");
-    }
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!user || !selectedDuration) return;
-
+    
     setLoading(true);
     const toastId = showLoading("Processing...");
-
+    
     try {
+      // If contract required, route to contract signing first (and include source + location)
       if (selectedDuration.requires_contract) {
         showSuccess("Redirecting to contract...", toastId);
         router.push(
-          `/contract?user_id=${user.id}&plan_duration_id=${selectedDuration.id}`
+          `/contract?user_id=${encodeURIComponent(user.id)}&plan_duration_id=${encodeURIComponent(selectedDuration.id)}&source=${encodeURIComponent("member:change-membership")}`
         );
         return;
       }
-
-      const planKey = selectedDuration.plan_name
-        .toUpperCase()
-        .replace(/\s/g, "_");
-      const durationKey = selectedDuration.duration_label
-        .toUpperCase()
-        .replace(/\s/g, "");
-
+    
       const url = await createStripeSession({
         userId: user.id,
         planDurationId: selectedDuration.id,
-        planKey,
-        durationKey,
-        requiresContract: selectedDuration.requires_contract || false,
-        // 🔹 Pass preferred location forward (even if null for now)
+        requiresContract: false,
+        source: "member:change-membership",
         locationId: preferredLocationId || null,
+        // If you later add toggles on this page, you’d pass:
+        // paidInFull, autoRenewalEnabled, renewAtDiscountedRate, isRenewal
       });
-
+    
       showSuccess("Redirecting to payment...", toastId);
       window.location.href = url;
     } catch (err) {
       console.error("Change Membership Error:", err);
       showError(err.message || "Something went wrong.", toastId);
-      setLoading(false);
     } finally {
+      setLoading(false);
       dismissToast(toastId);
     }
   };
@@ -131,7 +116,11 @@ const MembershipChange = ({ user }) => {
     <div className="min-h-screen flex flex-col items-center justify-center bg-gray-900 text-white px-4 py-16">
       <h1 className="text-3xl font-bold mb-4">Change Membership</h1>
 
-      <div className="w-full max-w-md space-y-4">
+      <p className="text-xs text-gray-500 text-center max-w-md mb-4">
+        Billing, renewals, and access cutoffs are processed based on America/Chicago.
+      </p>
+
+      <form onSubmit={handleSubmit} className="w-full max-w-md space-y-4">
         <label className="block text-sm font-medium">
           Select Membership Plan
         </label>
@@ -168,14 +157,33 @@ const MembershipChange = ({ user }) => {
           </>
         )}
 
+        {selectedDuration?.requires_contract && (
+          <p className="text-xs text-yellow-400">
+            This option requires signing a contract before checkout.
+          </p>
+        )}
+
+        {selectedDuration && (
+          <div className="rounded-lg border border-gray-700 bg-gray-800 p-3 text-sm">
+            <p>
+              <span className="font-semibold">Selected:</span> {selectedPlan} — {selectedDuration.duration_label}
+            </p>
+            <p className="text-gray-400 mt-1">
+              {selectedDuration.requires_contract
+                ? "Requires contract before payment."
+                : "No contract required."}
+            </p>
+          </div>
+        )}
+
         <button
-          onClick={handleSubmit}
+          type="submit"
           disabled={loading || !selectedDurationId}
           className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold rounded-xl mt-4 disabled:opacity-50"
         >
           {loading ? "Processing..." : "Confirm Change"}
         </button>
-      </div>
+      </form>
     </div>
   );
 };

@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import withAuth from "@/lib/withAuth";
 import { supabase } from "@/lib/supabaseClient";
+import { fetchUserByIdClient, updateUserByIdClient } from "@/lib/queries/users.client";
 import uploadProfileImage from "@/lib/helpers/uploadProfileImage";
 import EmailChangeSection from "@/components/account/EmailChangeSection";
 import {
@@ -51,9 +52,11 @@ function AccountPage({ user, profileUrl }) {
     if (!user?.id) return;
 
     (async () => {
-      const { data, error } = await supabase
-        .from("users")
-        .select(
+      let data = null;
+
+      try {
+        data = await fetchUserByIdClient(
+          user.id,
           `
           full_name,
           phone,
@@ -71,11 +74,8 @@ function AccountPage({ user, profileUrl }) {
           notify_promos,
           notify_events
         `
-        )
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (error) {
+        );
+      } catch (error) {
         console.error("[Account] Failed to load user profile:", error);
         showError("Failed to load your account details.");
         return;
@@ -83,21 +83,17 @@ function AccountPage({ user, profileUrl }) {
 
       if (!data) return;
 
-      if (data.full_name) setFullName(data.full_name);
-      if (data.phone) setPhone(data.phone);
-      if (data.profile_url) setCurrentPhoto(data.profile_url);
-
-      if (data.preferred_location_id) {
-        setPreferredLocationId(data.preferred_location_id);
-      }
-      if (data.timezone) setTimezone(data.timezone);
-      if (data.birthday) setBirthday(data.birthday); // "YYYY-MM-DD"
-
-      if (data.address_line1) setAddressLine1(data.address_line1);
-      if (data.address_line2) setAddressLine2(data.address_line2);
-      if (data.city) setCity(data.city);
-      if (data.state) setStateRegion(data.state);
-      if (data.postal_code) setPostalCode(data.postal_code);
+      setFullName(data.full_name || "");
+      setPhone(data.phone || "");
+      setCurrentPhoto(data.profile_url || null);
+      setPreferredLocationId(data.preferred_location_id || "");
+      setTimezone(data.timezone || "America/Chicago");
+      setBirthday(data.birthday || "");
+      setAddressLine1(data.address_line1 || "");
+      setAddressLine2(data.address_line2 || "");
+      setCity(data.city || "");
+      setStateRegion(data.state || "");
+      setPostalCode(data.postal_code || "");
 
       setNotifyMembership(
         data.notify_membership !== null ? data.notify_membership : true
@@ -138,6 +134,14 @@ function AccountPage({ user, profileUrl }) {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (newPhotoPreview) {
+        URL.revokeObjectURL(newPhotoPreview);
+      }
+    };
+  }, [newPhotoPreview]);
 
   const handlePhotoChange = (e) => {
     const file = e.target.files?.[0];
@@ -211,12 +215,9 @@ function AccountPage({ user, profileUrl }) {
       updates.notify_promos = !!notifyPromos;
       updates.notify_events = !!notifyEvents;
 
-      const { error: updateError } = await supabase
-        .from("users")
-        .update(updates)
-        .eq("id", user.id);
-
-      if (updateError) {
+      try {
+        await updateUserByIdClient(user.id, updates);
+      } catch (updateError) {
         console.error("[Account] Failed to update user:", updateError);
         throw new Error("Could not save your changes. Please try again.");
       }
@@ -307,6 +308,9 @@ function AccountPage({ user, profileUrl }) {
 
       {/* Main content */}
       <main className="max-w-5xl mx-auto px-4 py-8">
+        <p className="text-[11px] text-gray-500 mb-4">
+          Your selected timezone affects how dates are shown to you. Billing, renewals, and access cutoffs are processed in America/Chicago.
+        </p>
         <div className="grid gap-6 lg:grid-cols-[2fr,1.6fr]">
           {/* Left column: profile form */}
           <form
@@ -413,9 +417,7 @@ function AccountPage({ user, profileUrl }) {
                   onChange={(e) => setPreferredLocationId(e.target.value)}
                 >
                   <option value="">
-                    {locationsLoading
-                      ? "Loading locations..."
-                      : "Select a home gym"}
+                    {locationsLoading ? "Loading locations..." : "No preferred gym selected"}
                   </option>
                   {locations.map((loc) => (
                     <option key={loc.id} value={loc.id}>
@@ -454,7 +456,7 @@ function AccountPage({ user, profileUrl }) {
                   </option>
                 </select>
                 <p className="text-xs text-gray-500 mt-1">
-                  Used for membership dates and notifications.
+                  Used for displaying dates and reminders in your local time. Billing and access cutoffs are still based on America/Chicago.
                 </p>
               </div>
             </div>

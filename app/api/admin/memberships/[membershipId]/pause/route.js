@@ -1,108 +1,218 @@
 // app/api/admin/memberships/[membershipId]/pause/route.js
-import { createServerClient } from "@supabase/ssr";
-import { cookies as nextCookies } from "next/headers";
+import { NextResponse } from "next/server";
 import Stripe from "stripe";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { fetchMembershipById } from "@/lib/db/memberships";
+import { fetchUserRoleById } from "@/lib/db/users";
+import {
+  getNowUtcIso,
+  getEndOfDayUtcIso,
+} from "@/lib/utils/dateTime";
 
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" }) : null;
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" })
+  : null;
+
+async function requireAdmin(req) {
+  const authHeader = req.headers.get("authorization") || "";
+  const token = authHeader.toLowerCase().startsWith("bearer ")
+    ? authHeader.slice(7)
+    : null;
+
+  if (!token) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Missing Authorization token.",
+    };
+  }
+
+  const { data: auth, error: authErr } = await supabaseAdmin.auth.getUser(token);
+
+  if (authErr || !auth?.user?.id) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Invalid or expired token.",
+    };
+  }
+
+  let adminUser = null;
+
+  try {
+    adminUser = await fetchUserRoleById(supabaseAdmin, auth.user.id);
+  } catch (err) {
+    console.error("❌ Failed to verify admin role:", err);
+
+    return {
+      ok: false,
+      status: 500,
+      error: "Failed to verify admin role.",
+    };
+  }
+
+  if ((adminUser?.role || "").toLowerCase() !== "admin") {
+    return {
+      ok: false,
+      status: 403,
+      error: "Forbidden.",
+    };
+  }
+
+  return {
+    ok: true,
+    admin_user_id: auth.user.id,
+  };
+}
 
 export async function POST(req, { params }) {
-  const membershipId = params?.membershipId;
-
-  // auth + supabase
-  const authHeader = req.headers.get("authorization");
-  const token = authHeader?.split(" ")[1] || "";
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    {
-      global: { headers: token ? { Authorization: `Bearer ${token}` } : {} },
-      cookies: {
-        async get(name) { return (await nextCookies()).get(name)?.value; },
-        async set(name, value, options) { (await nextCookies()).set(name, value, options); },
-        async remove(name, options) { (await nextCookies()).delete(name, options); },
-      },
-    }
-  );
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return Response.json({ error: "Unauthorized." }, { status: 401 });
-
-  // body
-  let body = {};
-  try { body = await req.json(); } catch {}
-  const isClear = !!body?.clear;
-  const untilStr = (body?.until ?? "") || null;
-  const pauseBilling = !!body?.pause_billing;
-  const notes = body?.notes ?? null;
-
-  // membership
-  const { data: membership, error: mErr } = await supabase
-    .from("memberships")
-    .select("id, user_id, stripe_subscription_id")
-    .eq("id", membershipId)
-    .maybeSingle();
-  if (mErr || !membership) return Response.json({ error: "Membership not found." }, { status: 404 });
-
-  const now = new Date().toISOString();
-
-  // compute pauseUntilISO
-  let pauseUntilISO = null;
-  if (!isClear && untilStr) {
-    const d = new Date(untilStr);
-    if (Number.isNaN(d.getTime())) {
-      return Response.json({ error: "Invalid 'until' date." }, { status: 400 });
-    }
-    pauseUntilISO = d.toISOString();
+  if (process.env.VERCEL_ENV === "preview") {
+    return new Response("Admin API disabled in Preview", { status: 403 });
   }
 
-  // upsert override locally (null clears)
-  const { error: upErr } = await supabase
-    .from("membership_overrides")
-    .upsert({
-      membership_id: membership.id,
-      user_id: membership.user_id,
-      pause_until: isClear ? null : pauseUntilISO,
-      notes,
-      updated_by: user.id,
-      updated_at: now,
-    }, { onConflict: "membership_id" });
-  if (upErr) return Response.json({ error: "Failed to save override." }, { status: 500 });
-
-  // Mirror billing pause/unpause in Stripe only when requested AND we know a sub id
-  if (stripe && membership.stripe_subscription_id) {
-    try {
-      if (isClear || !pauseBilling) {
-        await stripe.subscriptions.update(membership.stripe_subscription_id, {
-          pause_collection: null,
-        });
-      } else if (pauseBilling) {
-        await stripe.subscriptions.update(membership.stripe_subscription_id, {
-          pause_collection: { behavior: "mark_uncollectible" },
-        });
-      }
-    } catch (e) {
-      console.error("Stripe pause/unpause failed:", e);
-      // don't fail the request
-    }
-  }
-
-  // audit
   try {
-    await supabase.from("admin_audit_logs").insert({
-      action: isClear ? "membership_clear_pause" : "membership_pause",
-      admin_user_id: user.id,
-      target_membership_id: membership.id,
-      target_user_id: membership.user_id,
-      details: { pause_until: isClear ? null : pauseUntilISO, pause_billing: pauseBilling, notes },
-      created_at: now,
-    });
-  } catch {}
+    const resolvedParams = await params;
+    const membershipId = resolvedParams?.membershipId;
 
-  return Response.json({
-    ok: true,
-    membership_id: membership.id,
-    pause_until: isClear ? null : pauseUntilISO,
-    pause_billing: pauseBilling && !isClear,
-  });
+    if (!membershipId) {
+      return NextResponse.json(
+        { ok: false, error: "Missing membershipId." },
+        { status: 400 }
+      );
+    }
+
+    const gate = await requireAdmin(req);
+
+    if (!gate.ok) {
+      return NextResponse.json(
+        { ok: false, error: gate.error },
+        { status: gate.status }
+      );
+    }
+
+    const body = await req.json().catch(() => ({}));
+
+    const isClear = !!body?.clear;
+    const untilStr = body?.until || null;
+    const pauseBilling = !!body?.pause_billing;
+    const notes = body?.notes ?? null;
+
+    let membership = null;
+
+    try {
+      membership = await fetchMembershipById(supabaseAdmin, membershipId);
+    } catch (membershipError) {
+      console.error("❌ Failed to fetch membership:", membershipError);
+
+      return NextResponse.json(
+        { ok: false, error: "Failed to load membership." },
+        { status: 500 }
+      );
+    }
+
+    if (!membership?.id) {
+      return NextResponse.json(
+        { ok: false, error: "Membership not found." },
+        { status: 404 }
+      );
+    }
+
+    const nowIso = getNowUtcIso();
+
+    let pauseUntilIso = null;
+
+    if (!isClear && untilStr) {
+      pauseUntilIso = getEndOfDayUtcIso(untilStr);
+
+      if (!pauseUntilIso) {
+        return NextResponse.json(
+          { ok: false, error: "Invalid 'until' date." },
+          { status: 400 }
+        );
+      }
+    }
+
+    const { error: overrideError } = await supabaseAdmin
+      .from("membership_overrides")
+      .upsert(
+        {
+          membership_id: membership.id,
+          user_id: membership.user_id,
+          pause_until: isClear ? null : pauseUntilIso,
+          notes,
+          updated_by: gate.admin_user_id,
+          updated_at: nowIso,
+        },
+        { onConflict: "membership_id" }
+      );
+
+    if (overrideError) {
+      console.error("❌ Failed to save pause override:", overrideError);
+
+      return NextResponse.json(
+        { ok: false, error: "Failed to save override." },
+        { status: 500 }
+      );
+    }
+
+    if (stripe && membership.stripe_subscription_id) {
+      try {
+        if (isClear || !pauseBilling) {
+          await stripe.subscriptions.update(membership.stripe_subscription_id, {
+            pause_collection: null,
+          });
+        } else {
+          await stripe.subscriptions.update(membership.stripe_subscription_id, {
+            pause_collection: {
+              behavior: "mark_uncollectible",
+            },
+          });
+        }
+      } catch (stripeError) {
+        console.error("⚠️ Stripe pause/unpause failed. Non-fatal:", stripeError);
+      }
+    }
+
+    const { error: auditError } = await supabaseAdmin
+      .from("admin_audit_logs")
+      .insert({
+        action: isClear ? "membership_clear_pause" : "membership_pause",
+        admin_id: gate.admin_user_id,
+        target_membership_id: membership.id,
+        target_user_id: membership.user_id,
+        details: {
+          pause_until: isClear ? null : pauseUntilIso,
+          pause_billing: pauseBilling && !isClear,
+          notes,
+        },
+        created_at: nowIso,
+      });
+
+    if (auditError) {
+      console.warn(
+        "⚠️ Failed to insert pause audit log. Non-fatal:",
+        auditError?.message || auditError
+      );
+    }
+
+    return NextResponse.json(
+      {
+        ok: true,
+        membership_id: membership.id,
+        pause_until: isClear ? null : pauseUntilIso,
+        pause_billing: pauseBilling && !isClear,
+      },
+      { status: 200 }
+    );
+  } catch (error) {
+    console.error("❌ pause membership route fatal error:", error);
+
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error?.message || "Unexpected error pausing membership.",
+      },
+      { status: 500 }
+    );
+  }
 }

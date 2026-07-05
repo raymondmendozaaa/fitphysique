@@ -13,6 +13,7 @@ import {
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import THE_GYM_LOGO from "@/public/assets/img/logos/the-gym-logo.png";
+import { formatDateTimeInTimeZone } from "@/lib/utils/dateTime";
 
 const styles = StyleSheet.create({
   page: {
@@ -125,44 +126,6 @@ const ContractDocument = ({ contract }) => {
     </Page>
   );
 
-  // Additional pages if content is long (for now we simulate just 1 extra page)
-  // In a real app, you'd split long content into pages dynamically if needed
-  const needsExtraPages = true; // adjust as needed
-  if (needsExtraPages) {
-    pages.push(
-      <Page key="page-2" size="A4" style={styles.page}>
-        <Text style={styles.label}>Continued Agreement:</Text>
-        <Text style={styles.field}>{contract.content.slice(2000)}</Text>
-
-        {/* Small logo top-right */}
-        <Image
-          src={contract.logo}
-          style={{
-            width: 30,
-            height: 30,
-            position: "absolute",
-            top: 30,
-            right: 40,
-            opacity: 0.5, // subtle watermark feel
-          }}
-        />
-
-        {/* Footer */}
-        <View fixed style={styles.footer}>
-          <Text>support@thegym.com</Text>
-          <Text>Powered by THE GYM</Text>
-          <Text style={{ marginTop: 4 }}>
-            This document is confidential and intended only for the recipient. Unauthorized distribution is prohibited.
-          </Text>
-          <Text
-            style={{ marginTop: 4 }}
-            render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`}
-          />
-        </View>
-      </Page>
-    );
-  }
-
   return <Document>{pages}</Document>;
 };
 
@@ -192,7 +155,7 @@ export default function ContractPDFPreview({ userId }) {
           plan: data.plan_durations
             ? `${data.plan_durations.plan_name} - ${data.plan_durations.duration_label}`
             : "N/A",
-          created_at: new Date(data.created_at).toLocaleString("en-US"),
+          created_at: formatDateTimeInTimeZone(data.created_at),
           signature: data.signature,
           ip_address: data.ip_address,
           location_name: data.location?.name || "N/A",

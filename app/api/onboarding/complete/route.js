@@ -1,6 +1,8 @@
 // app/api/onboarding/complete/route.js
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { updateUserById } from "@/lib/db/users";
+import { getNowUtcIso } from "@/lib/utils/dateTime";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -10,7 +12,9 @@ const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY;
 export async function POST(req) {
   try {
     const authHeader = req.headers.get("authorization") || "";
-    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const token = authHeader.toLowerCase().startsWith("bearer ")
+      ? authHeader.slice(7).trim()
+      : null;
     if (!token) {
       return NextResponse.json({ message: "Missing auth token" }, { status: 401 });
     }
@@ -28,12 +32,13 @@ export async function POST(req) {
 
     // 2) Flip onboarded = true (and optional timestamp) with service role
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
-    const { error: upErr } = await admin
-      .from("users")
-      .update({ onboarded: true, onboarded_at: new Date().toISOString() }) 
-      .eq("id", userId);
 
-    if (upErr) {
+    try {
+      await updateUserById(admin, userId, {
+        onboarded: true,
+        onboarded_at: getNowUtcIso(),
+      });
+    } catch (upErr) {
       console.error("onboarding/complete update failed:", upErr);
       return NextResponse.json({ message: "Update failed" }, { status: 500 });
     }

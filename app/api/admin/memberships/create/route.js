@@ -6,6 +6,8 @@ import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
 import { createClient } from "@supabase/supabase-js";
 import { createMembershipUniversal } from "@/lib/admin/createMembershipUniversal";
 import { createUserAdmin } from "@/lib/admin/createUserAdmin";
+import { fetchPlanDurationById } from "@/lib/db/planDurations";
+import { fetchUserRoleById } from "@/lib/db/users";
 
 async function ensureAdmin(req) {
   // 1) If a Bearer token is present, build a Supabase client with that token
@@ -38,13 +40,12 @@ async function ensureAdmin(req) {
   if (uErr) throw Object.assign(new Error(uErr.message), { status: 401 });
   if (!user) throw Object.assign(new Error("UNAUTHORIZED"), { status: 401 });
 
-  const { data: profile, error: pErr } = await supabase
-    .from("users")
-    .select("role")
-    .eq("id", user.id)
-    .single();
+  const profile = await fetchUserRoleById(supabase, user.id);
 
-  if (pErr) throw Object.assign(new Error(pErr.message), { status: 500 });
+  if (!profile) {
+    throw Object.assign(new Error("User profile not found"), { status: 404 });
+  }
+
   if (profile?.role !== "admin") {
     throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
   }
@@ -53,6 +54,10 @@ async function ensureAdmin(req) {
 }
 
 export async function POST(req) {
+  if (process.env.VERCEL_ENV === "preview") {
+    return new Response("Admin API disabled in Preview", { status: 403 });
+  }
+
   try {
     const { supabase } = await ensureAdmin(req);
 
@@ -98,15 +103,15 @@ export async function POST(req) {
     
       if (requiresContract) {
         // Optional: fetch duration to compute a PIF hint for the contract page
-        const { data: pd } = await supabase
-          .from("plan_durations")
-          .select("duration_label, paid_in_full_price")
-          .eq("id", planDurationId)
-          .single();
-      
-        const isPaidInFull =
-          !!pd?.paid_in_full_price ||
-          (pd?.duration_label || "").toLowerCase().includes("paid in full");
+        let pd = null;
+
+        try {
+          pd = await fetchPlanDurationById(supabase, planDurationId);
+        } catch (planLookupError) {
+          console.error("Plan duration lookup failed during contract detour:", planLookupError);
+        }
+
+        const isPaidInFull = !!pd?.is_paid_in_full;
       
         const base = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
         const signUrl = `${base}/contracts?` + new URLSearchParams({

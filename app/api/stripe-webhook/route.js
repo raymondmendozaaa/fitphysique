@@ -24,9 +24,9 @@ export async function POST(req) {
 
     console.log(`✅ Stripe event handled: ${event.type}`);
 
-    return NextResponse.json(result);
+    return NextResponse.json(result, { status: result?.status || 200 });
   } catch (err) {
-    console.error("❌ Error in handleStripeEvent:", err.message);
+    console.error("❌ Error in handleStripeEvent:", err);
     return new NextResponse(`Internal Server Error: ${err.message}`, { status: 500 });
   }
 }

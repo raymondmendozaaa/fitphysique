@@ -4,16 +4,26 @@ import { getStripePriceKey } from "@/lib/helpers/stripeUtils";
 import { buildStripeMetadata } from "@/lib/helpers/buildStripeMetadata";
 import { createServerClient } from "@supabase/ssr";
 import { cookies as nextCookies } from "next/headers";
+import { fetchUserPricingTierById } from "@/lib/db/users";
+import { 
+  getNowUtcIso, 
+  getStartOfDayUtcIso,
+  toValidDate, 
+} from "@/lib/utils/dateTime";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-function makeSupabase() {
+async function makeSupabase() {
+  const cookieStore = await nextCookies();
+
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     {
       cookies: {
-        get(name) { return nextCookies().get(name)?.value; },
+        get(name) {
+          return cookieStore.get(name)?.value;
+        },
         async set() {},
         async remove() {},
       },
@@ -27,7 +37,7 @@ async function resolveStripePriceIdDB({
   plan_duration_id,
   pricing_tier_override,
 }) {
-  const nowIso = new Date().toISOString();
+  const nowIso = getNowUtcIso();
   const allowedTiers = new Set(["standard", "legacy", "staff", "family"]);
 
   // Helper: validate tier strings defensively
@@ -68,17 +78,17 @@ async function resolveStripePriceIdDB({
   if (ovErr) console.warn("user_price_overrides lookup error:", ovErr?.message);
   if (override?.stripe_price_id_override) {
     // Note: override sets priceId directly; tierUsed is unknown, but keep it meaningful
-    return { priceId: override.stripe_price_id_override, source: "override", tierUsed: "override" };
+    return { priceId: override.stripe_price_id_override, source: "override", tierUsed: "null" };
   }
 
   // 2) derive tier: user tier if set & not expired
-  const { data: userRow, error: uErr } = await supabase
-    .from("users")
-    .select("pricing_tier, pricing_tier_until")
-    .eq("id", user_id)
-    .single();
+  let userRow = null;
 
-  if (uErr) console.warn("users tier lookup error:", uErr?.message);
+  try {
+    userRow = await fetchUserPricingTierById(supabase, user_id);
+  } catch (uErr) {
+    console.warn("users tier lookup error:", uErr?.message || uErr);
+  }
 
   let tier = "standard";
   const userTier = sanitizeTier(userRow?.pricing_tier);
@@ -137,7 +147,7 @@ async function resolveStripePriceIdDB({
 }
 
 export async function POST(req) {
-  const t0 = Date.now();
+  const t0 = performance.now();
   try {
     const {
       user_id,
@@ -156,9 +166,15 @@ export async function POST(req) {
       gps_accuracy,
       start_date,
       checkout_behavior,
-      source,
       pricing_tier_override,
     } = await req.json();
+
+    if (!user_id || !plan_duration_id) {
+      return new Response(
+        JSON.stringify({ error: "Missing user_id or plan_duration_id." }),
+        { status: 400 }
+      );
+    }
 
     // Normalize keys
     const isRenewal = Boolean(is_renewal);
@@ -173,7 +189,7 @@ export async function POST(req) {
     });
 
     // 1) Plan info
-    const supabase = makeSupabase();
+    const supabase = await makeSupabase();
     const planInfo = await getPlanInfoByIdServer(supabase, plan_duration_id);
     if (!planInfo?.plan_name || !planInfo?.duration_label) {
       console.error("❌ Invalid plan info:", planInfo);
@@ -185,18 +201,25 @@ export async function POST(req) {
     const isGuestPass = pn.toLowerCase().startsWith("guest");
 
     // 3) Paid-in-Full logic
-    const usePaidInFull = Boolean(paid_in_full);
-    const useDiscountedRate = Boolean(renew_at_discounted_rate);
+    const usePaidInFull = !!planInfo.is_paid_in_full;
+    const useDiscountedRate =
+      usePaidInFull && !!auto_renewal_enabled
+        ? !!renew_at_discounted_rate
+        : false;
 
-    // 4) Metadata (all strings)
+    // 4) Resolve Stripe mode FIRST (needed for metadata + session payload)
+    const stripeMode = isGuestPass ? "payment" : "subscription";
+
+    // 5) Metadata (all strings, consistent snake_case)
     const metadata = buildStripeMetadata({
       user_id,
       plan_duration_id,
       requires_contract,
       paid_in_full: usePaidInFull,
       auto_renewal_enabled,
-      renew_at_discounted_rate,
-      isRenewal,                    // ✅ camelCase
+      renew_at_discounted_rate: useDiscountedRate,
+      is_renewal: isRenewal,
+      // price_source added later after price resolution
       signature,
       agreed,
       contract_id,
@@ -206,29 +229,43 @@ export async function POST(req) {
       gps_accuracy,
       start_date,
       checkout_behavior,
-      source,
     });
 
-    // 5) Resolve price id (DB-first ➜ env fallback)
+    const appUrl =
+      process.env.APP_BASE_URL ||
+      process.env.NEXT_PUBLIC_BASE_URL ||
+      "http://localhost:3000";
+
+    // use whatever routes you want here
+    const success_url = `${appUrl}/success?session_id={CHECKOUT_SESSION_ID}`;
+    const cancel_url = `${appUrl}/cancel`;
+
+    const isAdminFlow = String(metadata.source || "").startsWith("admin");
+
+    // 6) Resolve price id (DB-first ➜ env fallback)
     let priceId = null;
     let priceSource = "none";
+    let effectiveTierUsed = null;
 
-    // Try DB mapping (override ➜ tier ➜ standard)
+    // ✅ DB-first resolution (plan_duration_prices / user overrides / tiers)
     try {
-      const resolved = await resolveStripePriceIdDB({ 
-        supabase, 
-        user_id, 
-        plan_duration_id, 
+      const resolved = await resolveStripePriceIdDB({
+        supabase,
+        user_id,
+        plan_duration_id,
         pricing_tier_override,
       });
-
-      priceId = resolved.priceId;
-      priceSource = resolved.source;
-      let effectiveTierUsed = resolved.tierUsed;
+    
+      if (resolved?.priceId) {
+        priceId = resolved.priceId;
+        priceSource = resolved.source || "db";
+        effectiveTierUsed = resolved.tierUsed || null;
+      }
     } catch (e) {
-      console.warn("DB price resolution failed, will try ENV fallback:", e?.message || e);
+      console.warn("⚠️ resolveStripePriceIdDB failed, falling back to env:", e?.message || e);
     }
 
+    // ✅ Env fallback (legacy keys)
     if (!priceId) {
       const stripePriceKey = getStripePriceKey(
         planInfo.plan_name,
@@ -237,11 +274,15 @@ export async function POST(req) {
         useDiscountedRate,
         isRenewal
       );
+    
       priceId = process.env[stripePriceKey] || null;
       priceSource = `env:${stripePriceKey}`;
+      // tier is unknown in env fallback; keep it deterministic
+      if (!effectiveTierUsed) effectiveTierUsed = pricing_tier_override || "standard";
     }
 
-    console.log("🔑 Resolved Stripe Price:", { priceId, priceSource });
+    // Hard fail if still missing
+    console.log("🔑 Resolved Stripe Price:", { priceId, priceSource, effectiveTierUsed });
     if (!priceId) {
       console.error("❌ No Stripe Price configured", {
         plan: planInfo.plan_name,
@@ -249,7 +290,7 @@ export async function POST(req) {
         isRenewal,
         paid_in_full,
         renew_at_discounted_rate,
-        triedSource: priceSource, // likely "none" here
+        triedSource: priceSource,
       });
       return new Response(
         JSON.stringify({ error: "No Stripe Price configured for this selection." }),
@@ -257,59 +298,17 @@ export async function POST(req) {
       );
     }
 
-    // 6) Mode + URLs
-    const stripeMode = isGuestPass ? "payment" : "subscription";
-    console.log("🔁 Stripe mode selected:", stripeMode);
-      
-    const baseUrl = process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_BASE_URL;
-    if (!baseUrl) {
-      console.error("❌ Missing APP_BASE_URL / NEXT_PUBLIC_BASE_URL");
-      return new Response(JSON.stringify({ error: "Base URL not configured" }), { status: 500 });
-    }
-
-    const requiresContractBool =
-      typeof requires_contract === "boolean"
-        ? requires_contract
-        : Boolean(planInfo?.requires_contract);
-      
-    const isAdminFlow =
-      typeof source === "string" && source.toLowerCase().includes("admin");
-      
-    const cancel_url = requiresContractBool
-      ? `${baseUrl}/contract?user_id=${encodeURIComponent(
-          user_id
-        )}&plan_duration_id=${encodeURIComponent(
-          plan_duration_id
-        )}&source=${encodeURIComponent(source || "")}`
-      : isAdminFlow
-      ? `${baseUrl}/admin/customers/${encodeURIComponent(
-          user_id
-        )}?tab=memberships`
-      : `${baseUrl}/onboarding`;
-      
-    const success_url = isAdminFlow
-      ? `${baseUrl}/admin/customers/${encodeURIComponent(
-          user_id
-        )}?tab=memberships&checkout=success`
-      : `${baseUrl}/onboarding`;
-
-    console.log("🧭 Checkout debug", {
-      plan: planInfo.plan_name,
-      duration: planInfo.duration_label,
-      priceId,
-      priceSource,
-      stripeMode,
-      isAdminFlow,
-      requiresContractBool,
-    });
-
+    // Finalize effective tier label
     if (!effectiveTierUsed) effectiveTierUsed = pricing_tier_override || "standard";
+
+    const effectiveTier = pricing_tier_override || effectiveTierUsed || "standard";
 
     const meta = {
       ...metadata,
-      effective_price_tier: String(pricing_tier_override || effectiveTierUsed || "standard"),
-      price_source: String(priceSource),   // e.g., "tier:legacy" or "env:STRIPE_STANDARD_MONTHLY"
-      stripe_mode: stripeMode,             // "payment" or "subscription"
+      effective_price_tier: String(effectiveTier),
+      pricing_tier_override: pricing_tier_override ? String(pricing_tier_override) : "",
+      price_source: String(priceSource),
+      stripe_mode: String(stripeMode),
     };
     
     // 7) Build session payload
@@ -333,11 +332,18 @@ export async function POST(req) {
       sessionPayload.subscription_data = { metadata: meta };
     
       if (checkout_behavior === "bill_at_start_date" && start_date) {
-        // Stripe expects a Unix timestamp (seconds)
-        const trialEnd = Math.floor(new Date(`${start_date}T00:00:00`).getTime() / 1000);
-        const now = Math.floor(Date.now() / 1000);
-        if (trialEnd > now) {
-          // ✅ correct property name
+        const trialEndDate = toValidDate(getStartOfDayUtcIso(start_date));
+        const nowDate = toValidDate(getNowUtcIso());
+              
+        const trialEnd = trialEndDate
+          ? Math.floor(trialEndDate.getTime() / 1000)
+          : null;
+              
+        const now = nowDate
+          ? Math.floor(nowDate.getTime() / 1000)
+          : null;
+              
+        if (trialEnd && now && trialEnd > now) {
           sessionPayload.subscription_data.trial_end = trialEnd;
         }
       }
@@ -346,7 +352,7 @@ export async function POST(req) {
     const session = await stripe.checkout.sessions.create(sessionPayload);
 
     // Mirror metadata to the created sub if Stripe returns a sub id
-    if (stripeMode === "subscription" && session.subscription && !usePaidInFull) {
+    if (stripeMode === "subscription" && session.subscription) {
       try {
         await stripe.subscriptions.update(session.subscription, { metadata: meta });
       } catch (e) {
@@ -354,7 +360,7 @@ export async function POST(req) {
       }
     }
 
-    console.log(`✅ Stripe session created in ${Date.now() - t0}ms:`, session.id);
+    console.log(`✅ Stripe session created in ${Math.round(performance.now() - t0)}ms:`, session.id);
     return new Response(JSON.stringify({ url: session.url }), { status: 200 });
   } catch (err) {
     console.error("❌ create-stripe-session failed:", {

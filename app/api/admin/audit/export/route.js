@@ -20,6 +20,10 @@ function adminClient() {
 }
 
 export async function GET(req) {
+  if (process.env.VERCEL_ENV === "preview") {
+    return new Response("Admin API disabled in Preview", { status: 403 });
+  }
+  
   try {
     // admin check
     const supabaseCaller = clientWithToken(req);

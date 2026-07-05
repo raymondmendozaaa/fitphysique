@@ -1,5 +1,8 @@
 import { createServerClient } from "@supabase/ssr";
 import { cookies as nextCookies } from "next/headers";
+import { fetchAccessEligibleMembershipForUser } from "@/lib/db/memberships";
+import { fetchActiveGuestPassForUser } from "@/lib/db/guestPasses";
+import { getNowUtcIso, toUtcIso } from "@/lib/utils/dateTime";
 
 // Defaults (used if a location doesn't have overrides set)
 const DEFAULT_COOLDOWN_SECONDS = 120;
@@ -9,6 +12,10 @@ const DEFAULT_MAX_ALLOWED_ACCURACY_METERS = 15;
 export async function POST(req) {
   const authHeader = req.headers.get("authorization");
   const token = authHeader?.split(" ")[1];
+
+  if (!token) {
+    return Response.json({ error: "Missing auth token." }, { status: 401 });
+  }
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -40,6 +47,11 @@ export async function POST(req) {
 
   // Method tag (informational)
   const method = body?.method || "geolocation";
+  const allowedMethods = ["geolocation", "qr", "manual"];
+
+  if (!allowedMethods.includes(method)) {
+    return Response.json({ error: "Invalid check-in method." }, { status: 400 });
+  }
 
   const { latitude, longitude, accuracy } = body;
   if (
@@ -127,11 +139,12 @@ export async function POST(req) {
 
   // Cooldown gate (per location)
   {
-    const sinceIso = new Date(Date.now() - COOLDOWN_SECONDS * 1000).toISOString();
+    const sinceIso = toUtcIso(Date.now() - COOLDOWN_SECONDS * 1000);
     const { data: recentCheckin, error: recentErr } = await supabase
       .from("checkins")
       .select("id, checkin_time")
       .eq("user_id", user.id)
+      .eq("location_id", nearest.id)
       .gte("checkin_time", sinceIso)
       .order("checkin_time", { ascending: false })
       .limit(1)
@@ -148,13 +161,19 @@ export async function POST(req) {
   // Access gate (membership or guest pass) and capture IDs
   const { membershipId, guestPassId } = await getAccessContext(supabase, user.id);
   if (!membershipId && !guestPassId) {
-    return Response.json({ error: "No active membership or valid guest pass found." }, { status: 403 });
+    return Response.json(
+      { error: "No access-eligible membership or valid guest pass found." },
+      { status: 403 }
+    );
   }
+
+  const checkinTimeIso = getNowUtcIso();
 
   // Insert check-in
   const { error: checkinError } = await supabase.from("checkins").insert({
     user_id: user.id,
     location_id: nearest.id,
+    checkin_time: checkinTimeIso,
     checkin_latitude: latitude,
     checkin_longitude: longitude,
     accuracy_meters: Math.round(accuracy * 100) / 100,
@@ -192,7 +211,7 @@ function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (deg) => (deg * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lat2 - lon1);
+  const dLon = toRad(lon2 - lon1);
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
@@ -203,34 +222,26 @@ function haversine(lat1, lon1, lat2, lon2) {
 async function getAccessContext(supabase, userId) {
   const membershipId = await getActiveMembershipId(supabase, userId);
   if (membershipId) return { membershipId, guestPassId: null };
-  const guestPassId = await getActiveGuestPassId(supabase, userId);
+  const guestPassId = await getAccessEligibleGuestPassId(supabase, userId);
   return { membershipId: null, guestPassId };
 }
 
 async function getActiveMembershipId(supabase, userId) {
-  const { data, error } = await supabase
-    .from("memberships")
-    .select("id, status, expires_at")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (error || !data) return null;
-  if (data.status === "active") return data.id;
-  if (data.expires_at && new Date(data.expires_at) > new Date()) return data.id;
-  return null;
+  try {
+    const membership = await fetchAccessEligibleMembershipForUser(supabase, userId);
+    return membership?.id || null;
+  } catch (error) {
+    console.error("❌ Failed to fetch access-eligible membership:", error);
+    return null;
+  }
 }
 
-async function getActiveGuestPassId(supabase, userId) {
-  const nowIso = new Date().toISOString();
-  const { data, error } = await supabase
-    .from("guest_passes")
-    .select("id, expires_at")
-    .eq("user_id", userId)
-    .gt("expires_at", nowIso)
-    .order("expires_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error || !data) return null;
-  return data.id;
+async function getAccessEligibleGuestPassId(supabase, userId) {
+  try {
+    const guestPass = await fetchActiveGuestPassForUser(supabase, userId);
+    return guestPass?.id || null;
+  } catch (error) {
+    console.error("❌ Failed to fetch active guest pass:", error);
+    return null;
+  }
 }

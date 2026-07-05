@@ -38,7 +38,7 @@ const MobileNav = ({ containerStyles, setOpenNav }) => {
                         to={id}
                         smooth
                         spy
-                        activeClass={`${!isMobile && "active"}`}
+                        activeClass={!isMobile ? "active" : ""}
                         offset={-80}
                         className={`
                           cursor-pointer transition-all duration-300 ease-in-out 
@@ -48,7 +48,7 @@ const MobileNav = ({ containerStyles, setOpenNav }) => {
                         `}
                         onClick={() => setOpenNav(false)} // Closes menu when clicking a section
                     >
-                        {id.charAt(0) + id.slice(1)}
+                        {id.charAt(0).toUpperCase() + id.slice(1)}
                     </ScrollLink>
                 ))}
             </div>

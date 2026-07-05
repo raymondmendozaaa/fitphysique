@@ -35,7 +35,7 @@ const AdminLocationsPage = ({ user, role }) => {
     setError(null);
     const { data, error } = await supabase
       .from("locations")
-      .select("id, name, address, city, state, zip_code, latitude, longitude, geofence_radius_m, cooldown_seconds")
+      .select("id, name, address, city, state, zip_code, latitude, longitude, geofence_radius_m, cooldown_seconds, max_accuracy_meters, conservative_geofence")
       .order("name", { ascending: true });
 
     if (error) {
@@ -78,30 +78,76 @@ const AdminLocationsPage = ({ user, role }) => {
     setSavingId(locId);
     setError(null);
 
-    // optimistic update
     const prev = locations;
     const next = prev.map((l) => (l.id === locId ? { ...l, ...patch } : l));
     setLocations(next);
 
-    const { error } = await supabase.from("locations").update(patch).eq("id", locId);
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
 
-    if (error) {
-      setError("Failed to update location.");
-      setLocations(prev); // revert
+      const token = session?.access_token;
+      if (!token) {
+        throw new Error("Missing admin session. Please log in again.");
+      }
+
+      const res = await fetch(`/api/admin/locations/${locId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(patch),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.message || "Failed to update location.");
+      }
+
+      await fetchLocations();
+    } catch (err) {
+      console.error("saveLocation error:", err);
+      setError(err.message || "Failed to update location.");
+      setLocations(prev);
+    } finally {
+      setSavingId(null);
     }
-
-    setSavingId(null);
   }
 
   async function deleteLocation(id) {
     if (!confirm("Delete this location? This cannot be undone.")) return;
-  
-    const { error } = await supabase.from("locations").delete().eq("id", id);
-    if (error) {
-      alert(error.message || "Failed to delete location.");
-      return;
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      const token = session?.access_token;
+      if (!token) {
+        throw new Error("Missing admin session. Please log in again.");
+      }
+
+      const res = await fetch(`/api/admin/locations/${id}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.message || "Failed to delete location.");
+      }
+
+      await fetchLocations();
+    } catch (err) {
+      console.error("deleteLocation error:", err);
+      alert(err.message || "Failed to delete location.");
     }
-    await fetchLocations();
   }
 
   function LocationCard({ loc, focused, cardRefs }) {
@@ -142,8 +188,8 @@ const AdminLocationsPage = ({ user, role }) => {
       const r = numOrNull(radius);
       const c = numOrNull(cooldown);
     
-      if (!Number.isFinite(r) || r <= 0 || r > 200) {
-        alert("Geofence radius must be a number between 1 and 200 meters.");
+      if (!Number.isFinite(r) || r <= 0 || r > 500) {
+        alert("Geofence radius must be a number between 1 and 500 meters.");
         return;
       }
       if (!Number.isFinite(c) || c < 30 || c > 3600) {
@@ -157,7 +203,7 @@ const AdminLocationsPage = ({ user, role }) => {
       });
     }
   
-    const cardTitle = `Geofence: ${loc.geofence_radius_m ?? DEFAULTS.geofence_radius_m}m • Cooldown: ${loc.cooldown_seconds ?? DEFAULTS.cooldown_seconds}s${
+    const cardTitle = `Geofence: ${loc.geofence_radius_m ?? DEFAULTS.geofence_radius_m}m • Cooldown: ${loc.cooldown_seconds ?? DEFAULTS.cooldown_seconds}s • Max Accuracy: ${loc.max_accuracy_meters ?? 15}m • Conservative: ${loc.conservative_geofence ? "Yes" : "No"}${
       loc.latitude != null && loc.longitude != null
         ? ` • Lat: ${loc.latitude}, Lng: ${loc.longitude}`
         : ""
@@ -240,6 +286,20 @@ const AdminLocationsPage = ({ user, role }) => {
             </div>
           )}
         </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-gray-400">
+          <div>
+            Max accuracy:{" "}
+            <span className="text-gray-200">
+              {loc.max_accuracy_meters ?? 15}m
+            </span>
+          </div>
+          <div>
+            Conservative geofence:{" "}
+            <span className="text-gray-200">
+              {loc.conservative_geofence ? "Enabled" : "Disabled"}
+            </span>
+          </div>
+        </div>
         
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
           <label className="block">
@@ -255,7 +315,7 @@ const AdminLocationsPage = ({ user, role }) => {
             <input
               type="number"
               min={1}
-              max={200}
+              max={500}
               step={1}
               value={radius}
               onChange={(e) => setRadius(e.target.value)}
@@ -308,6 +368,10 @@ const AdminLocationsPage = ({ user, role }) => {
           >
             Reset to defaults
           </button>
+        </div>
+                
+        <div className="text-xs text-gray-500">
+          Use <span className="text-gray-300 font-medium">Modify</span> for address, coordinates, max accuracy, and conservative geofence settings.
         </div>
         
         {/* EDIT modal – reuse the same modal in edit mode */}

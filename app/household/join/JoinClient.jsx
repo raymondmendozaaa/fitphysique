@@ -21,24 +21,27 @@ export default function JoinClient() {
       }
 
       const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
-        // not logged in – send to login but keep token in URL
+        data: { session },
+      } = await supabase.auth.getSession();
+      
+      if (!session?.user || !session?.access_token) {
+        const returnUrl = `/household/join?token=${encodeURIComponent(token)}`;
+      
         router.replace(
-          `/auth/login?redirect=/household/join?token=${encodeURIComponent(
-            token
-          )}`
+          `/auth/login?redirect=${encodeURIComponent(returnUrl)}`
         );
+      
         return;
       }
-
+      
       try {
         const res = await fetch("/api/households/join", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ userId: user.id, token }),
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ token }),
         });
 
         const payload = await res.json().catch(() => ({}));

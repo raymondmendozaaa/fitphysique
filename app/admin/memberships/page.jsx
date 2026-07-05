@@ -20,6 +20,13 @@ import SelectionBar from '@/components/admin/memberships/SelectionBar';
 import CreateMembershipSlideOver from '@/components/admin/memberships/CreateMembershipSlideOver';
 import { exportCsv as exportCsvUtil } from '@/lib/admin/memberships/exportCsv';
 import { showSuccess, showError, showInfo, askConfirm } from '@/lib/utils/toastUtils';
+import {
+  addDaysToDateInput,
+  formatAdminDate,
+  getNowUtcIso,
+  getTodayDateInputValue,
+  toAdminDateInputValue,
+} from '@/lib/utils/dateTime';
 
 const MembershipsPage = () => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -159,6 +166,7 @@ const MembershipsPage = () => {
         status: row.status,
         start_date: row.start_date,
         expires_at: row.expires_at,
+        grace_ends_at: row.grace_ends_at,
         next_payment_date: row.next_payment_date,
         contract_end_date: row.contract_end_date,
         plan_duration_id: row.plan_duration_id,
@@ -210,7 +218,7 @@ const MembershipsPage = () => {
       autoRenewalEnabled: !!createAutoRenewalEnabled,
       renewAtDiscountedRate: !!(createAutoRenewalEnabled && isPaidInFullSelected && createRenewAtDiscountedRate),
       isRenewal: false,
-      startDate: createStartDate || new Date().toISOString(),
+      startDate: createStartDate || getNowUtcIso(),
       locationId: null,
       createdBy: { role: 'admin', id: adminId },
       checkoutBehavior,
@@ -698,22 +706,27 @@ const MembershipsPage = () => {
   // -------- KPIs for current view --------
   const kpis = React.useMemo(() => {
     const rows = viewFiltered;
-    const today = new Date();
-    const in7 = new Date(); in7.setDate(today.getDate() + 7);
-
+    const todayAdmin = getTodayDateInputValue();
+    const in7Admin = addDaysToDateInput(todayAdmin, 7);
+    
     const count = rows.length;
     const active = rows.filter(r => r.status === 'active').length;
     const needsContract = rows.filter(r => r.requires_contract && r.needs_contract).length;
-    const renewals7d = rows.filter(r => {
+    
+    const renewals7d = rows.filter((r) => {
       if (!r.next_payment_date) return false;
-      const d = new Date(r.next_payment_date);
-      return d >= new Date(today.toDateString()) && d <= in7;
+    
+      const paymentAdminDate = toAdminDateInputValue(r.next_payment_date);
+      if (!paymentAdminDate) return false;
+    
+      return paymentAdminDate >= todayAdmin && paymentAdminDate <= in7Admin;
     }).length;
+  
     const dunning = rows.filter(r => (r.last_payment_status === 'failed') || !!r.renewal_pending).length;
     const suspended = rows.filter(r => r.status === 'suspended').length;
     const cancelled = rows.filter(r => r.status === 'cancelled').length;
     const pif = rows.filter(r => !!r.paid_in_full).length;
-
+  
     return [
       { label: 'In View', value: count },
       { label: 'Active', value: active },
@@ -996,12 +1009,10 @@ const MembershipsPage = () => {
                         {m.auto_renewal_enabled ? 'Enabled' : 'Disabled'}
                       </td>
                       <td className="px-4 py-3">
-                        {m.expires_at ? new Date(m.expires_at).toLocaleDateString() : '—'}
+                        {formatAdminDate(m.expires_at)}
                       </td>
                       <td className="px-4 py-3">
-                        {m.next_payment_date
-                          ? new Date(m.next_payment_date).toLocaleDateString()
-                          : '—'}
+                        {formatAdminDate(m.next_payment_date)}
                       </td>
                       <td className="px-4 py-3">{m.paid_in_full ? 'Yes' : 'No'}</td>
                       <td className="px-4 py-3">
@@ -1062,27 +1073,23 @@ const MembershipsPage = () => {
                             <div><strong>Pass Source:</strong> {m.pass_source || '—'}</div>
                             <div>
                               <strong>Promo Period:</strong>{' '}
-                              {m.promo_start_date
-                                ? new Date(m.promo_start_date).toLocaleDateString()
-                                : '—'}{' '}
+                              {formatAdminDate(m.promo_start_date)}{' '}
                               →{' '}
-                              {m.promo_end_date
-                                ? new Date(m.promo_end_date).toLocaleDateString()
-                                : '—'}
+                              {formatAdminDate(m.promo_end_date)}
                             </div>
                             <div>
                               <strong>Contract End:</strong>{' '}
-                              {m.contract_end_date
-                                ? new Date(m.contract_end_date).toLocaleDateString()
-                                : '—'}
+                              {formatAdminDate(m.contract_end_date)}
+                            </div>
+                            <div>
+                              <strong>Grace Ends:</strong>{' '}
+                              {formatAdminDate(m.grace_ends_at)}
                             </div>
                             <div><strong>Renewal Pending:</strong> {m.renewal_pending ? 'Yes' : 'No'}</div>
                             <div><strong>Attempts:</strong> {m.renewal_attempt_count}</div>
                             <div>
                               <strong>Last Attempt:</strong>{' '}
-                              {m.last_renewal_attempt
-                                ? new Date(m.last_renewal_attempt).toLocaleDateString()
-                                : '—'}
+                              {formatAdminDate(m.last_renewal_attempt)}
                             </div>
                             <div><strong>Stripe Session:</strong> {m.stripe_session_id || '—'}</div>
                             <div><strong>Stripe Sub ID:</strong> {m.stripe_subscription_id || '—'}</div>
@@ -1224,9 +1231,43 @@ const MembershipsPage = () => {
           const updates = {};
         
           if (cancelAction === 'cancel') {
-            updates.status = 'cancelled';
-            updates.auto_renewal_enabled = false;
-            updates.cancel_reason = cancelReason;
+            try {
+              const { data: { session } } = await supabase.auth.getSession();
+            
+              const res = await fetch("/api/admin/memberships/cancel", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(session?.access_token
+                    ? { Authorization: `Bearer ${session.access_token}` }
+                    : {}),
+                },
+                body: JSON.stringify({
+                  userId: selectedMember.user_id,
+                  membershipId: selectedMember.id,
+                  cancellationReason: cancelReason || null,
+                }),
+              });
+            
+              const payload = await res.json().catch(() => ({}));
+            
+              if (!res.ok || payload?.ok === false) {
+                throw new Error(payload?.error || payload?.message || "Cancellation failed.");
+              }
+            
+              await fetchMemberships();
+              setShowCancelModal(false);
+              setCancelAction('');
+              setCancelReason('');
+              setSuspendedUntil('');
+              setSelectedMember(null);
+              showSuccess(payload?.message || "Membership will not renew. Access remains through the current access period.");
+              return;
+            } catch (e) {
+              console.error("❌ Admin cancellation failed:", e);
+              showError(e.message || "An error occurred while cancelling the membership.");
+              return;
+            }
           }
         
           if (cancelAction === 'suspend') {

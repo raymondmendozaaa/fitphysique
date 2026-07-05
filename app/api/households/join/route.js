@@ -1,121 +1,140 @@
 // app/api/households/join/route.js
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { getNowUtcIso } from "@/lib/utils/dateTime";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+async function requireAuthenticatedUser(req) {
+  const authHeader = req.headers.get("authorization") || "";
+  const token = authHeader.toLowerCase().startsWith("bearer ")
+    ? authHeader.slice(7).trim()
+    : null;
+
+  if (!token) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Missing Authorization token.",
+    };
+  }
+
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+
+  if (error || !data?.user?.id) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Invalid or expired session.",
+    };
+  }
+
+  return {
+    ok: true,
+    user_id: data.user.id,
+  };
+}
 
 export async function POST(req) {
   try {
-    const { userId, token } = await req.json();
+    const gate = await requireAuthenticatedUser(req);
 
-    if (!userId || !token) {
+    if (!gate.ok) {
       return NextResponse.json(
-        { ok: false, error: "Missing userId or token." },
+        { ok: false, error: gate.error },
+        { status: gate.status }
+      );
+    }
+
+    const body = await req.json().catch(() => ({}));
+    const { userId, token } = body;
+
+    if (!token) {
+      return NextResponse.json(
+        { ok: false, error: "Missing invite token." },
         { status: 400 }
       );
     }
 
-    // lookup token
-    const { data: invite, error: inviteErr } = await supabaseAdmin
-      .from("household_join_tokens")
-      .select("*")
-      .eq("token", token)
-      .single();
+    const authenticatedUserId = gate.user_id;
 
-    if (inviteErr || !invite) {
+    // Do not let the request body impersonate another member.
+    if (userId && userId !== authenticatedUserId) {
       return NextResponse.json(
-        { ok: false, error: "Invalid invite link." },
-        { status: 404 }
+        { ok: false, error: "You cannot join a household for another user." },
+        { status: 403 }
       );
     }
 
-    if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
-      return NextResponse.json(
-        { ok: false, error: "This invite link has expired." },
-        { status: 400 }
-      );
-    }
+    const nowIso = getNowUtcIso();
 
-    if (
-      invite.max_uses != null &&
-      invite.used_count >= invite.max_uses
-    ) {
-      return NextResponse.json(
-        { ok: false, error: "This invite has already been used." },
-        { status: 400 }
-      );
-    }
+    const { data, error } = await supabaseAdmin.rpc(
+      "join_household_with_token",
+      {
+        p_token: token,
+        p_user_id: authenticatedUserId,
+        p_now: nowIso,
+      }
+    );
 
-    // check if user is already in a household
-    const { data: existingUser, error: userErr } = await supabaseAdmin
-      .from("users")
-      .select("id, household_id, household_role")
-      .eq("id", userId)
-      .single();
+    if (error) {
+      console.error("join_household_with_token error:", error);
 
-    if (userErr || !existingUser) {
-      return NextResponse.json(
-        { ok: false, error: "User not found." },
-        { status: 404 }
-      );
-    }
+      const message = error?.message || "";
 
-    if (existingUser.household_id && existingUser.household_id !== invite.household_id) {
-      // later you can allow “move” with confirmation
-      return NextResponse.json(
-        { ok: false, error: "User already belongs to a different household." },
-        { status: 400 }
-      );
-    }
+      if (message.includes("INVALID_INVITE")) {
+        return NextResponse.json(
+          { ok: false, error: "Invalid invite link." },
+          { status: 404 }
+        );
+      }
 
-    // upsert into household_members
-    const { data: hmRow, error: hmErr } = await supabaseAdmin
-      .from("household_members")
-      .insert({
-        household_id: invite.household_id,
-        user_id: userId,
-        role: existingUser.household_role || "dependent",
-      })
-      .select("*")
-      .single();
+      if (message.includes("INVITE_EXPIRED")) {
+        return NextResponse.json(
+          { ok: false, error: "This invite link has expired." },
+          { status: 400 }
+        );
+      }
 
-    if (hmErr) {
-      console.error("household_members insert error", hmErr);
+      if (message.includes("INVITE_USED_UP")) {
+        return NextResponse.json(
+          { ok: false, error: "This invite can no longer be used." },
+          { status: 400 }
+        );
+      }
+
+      if (message.includes("USER_IN_DIFFERENT_HOUSEHOLD")) {
+        return NextResponse.json(
+          { ok: false, error: "User already belongs to a different household." },
+          { status: 400 }
+        );
+      }
+
+      if (message.includes("USER_ALREADY_IN_HOUSEHOLD")) {
+        return NextResponse.json(
+          { ok: false, error: "User already belongs to this household." },
+          { status: 400 }
+        );
+      }
+
+      if (message.includes("USER_UPDATE_FAILED")) {
+        return NextResponse.json(
+          { ok: false, error: "Could not update the user's household." },
+          { status: 500 }
+        );
+      }
+
       return NextResponse.json(
         { ok: false, error: "Failed to join household." },
         { status: 500 }
       );
     }
 
-    // update users table current-state shortcuts
-    const { error: updateUserErr } = await supabaseAdmin
-      .from("users")
-      .update({
-        household_id: invite.household_id,
-        household_role: existingUser.household_role || "dependent",
-      })
-      .eq("id", userId);
-
-    if (updateUserErr) {
-      console.error("users household update error", updateUserErr);
-      return NextResponse.json(
-        { ok: false, error: "Joined, but failed to update user." },
-        { status: 500 }
-      );
-    }
-
-    // bump used_count
-    await supabaseAdmin
-      .from("household_join_tokens")
-      .update({ used_count: invite.used_count + 1 })
-      .eq("id", invite.id);
-
-    return NextResponse.json({ ok: true, householdMember: hmRow });
+    return NextResponse.json({
+      ok: true,
+      householdMember: data?.[0] || null,
+    });
   } catch (err) {
-    console.error("household join error", err);
+    console.error("household join error:", err);
+
     return NextResponse.json(
       { ok: false, error: "Unexpected error joining household." },
       { status: 500 }

@@ -1,104 +1,73 @@
 // app/api/trigger-renewal/route.js
+import Stripe from "stripe";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { createStripeSession } from "@/lib/utils/stripeSession";
+import { sendFailedPaymentEmail } from "@/lib/email/sendFailedPaymentEmail";
+import { fetchPastDueAutoRenewMemberships } from "@/lib/db/memberships";
+import { fetchUserBasicIdentityById } from "@/lib/db/users";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 export async function POST(req) {
   const authHeader = req.headers.get("authorization");
-
   if (authHeader !== `Bearer ${process.env.INTERNAL_SECRET}`) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const today = new Date();
-  const threeDaysFromNow = new Date(today);
-  threeDaysFromNow.setDate(today.getDate() + 3);
+  // 1) Find members who need recovery (not charging)
+  let memberships = [];
 
-  // Fetch eligible memberships
-  const { data: memberships, error } = await supabaseAdmin
-    .from("memberships")
-    .select(
-      "user_id, plan_duration_id, expires_at, renewal_pending, renewal_attempt_count, paid_in_full, renew_at_discounted_rate"
-    )
-    .eq("auto_renewal_enabled", true)
-    .eq("status", "active");
-
-  if (error) {
+  try {
+    memberships = await fetchPastDueAutoRenewMemberships(supabaseAdmin);
+  } catch (error) {
     console.error("❌ Failed to fetch memberships:", error.message);
     return Response.json({ error: "Fetch failed" }, { status: 500 });
   }
 
-  for (const member of memberships) {
-    const {
-      user_id,
-      plan_duration_id,
-      expires_at,
-      renewal_pending,
-      renewal_attempt_count = 0,
-      paid_in_full,
-      renew_at_discounted_rate,
-    } = member;
+  const baseUrl =
+    process.env.APP_BASE_URL ||
+    process.env.NEXT_PUBLIC_BASE_URL ||
+    "http://localhost:3000";
 
-    // Skip if renewal already succeeded or retry limit reached
-    if (renewal_pending || renewal_attempt_count >= 3) continue;
-
-    // Skip if not within 3-day window
-    const expiresDate = new Date(expires_at);
-    if (expiresDate > threeDaysFromNow) continue;
-
-    // Optional: check onboarded status
-    const { data: user } = await supabaseAdmin
-      .from("users")
-      .select("onboarded")
-      .eq("id", user_id)
-      .maybeSingle();
-
-    if (!user?.onboarded) continue;
-
+  for (const m of memberships) {
     try {
-      console.log(`🌀 Attempting auto-renewal for ${user_id} (Attempt #${renewal_attempt_count + 1})`);
+      // 2) Get Stripe customer id from subscription
+      const sub = await stripe.subscriptions.retrieve(m.stripe_subscription_id);
+      const customerId = sub.customer;
 
-      // 🔁 Create Stripe Checkout session with correct renewal type
-      await createStripeSession({
-        user_id,
-        plan_duration_id,
-        auto_renewal_enabled: true,
-        renew_at_discounted_rate: !!renew_at_discounted_rate,
-        paid_in_full: !!paid_in_full,
-        isRenewal: true,
+      // 3) Create Customer Portal session so they can update payment method
+      const portal = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: `${baseUrl}/member`,
       });
 
-      // Update renewal tracking in DB
-      await supabaseAdmin
-        .from("memberships")
-        .update({
-          renewal_attempt_count: renewal_attempt_count + 1,
-          last_renewal_attempt: new Date().toISOString(),
-          renewal_pending: true,
-        })
-        .eq("user_id", user_id)
-        .eq("plan_duration_id", plan_duration_id);
+      // 4) Email user the portal link (your existing email util)
+      let userRow = null;
 
-    } catch (err) {
-      console.error(`❌ Failed renewal for ${user_id}:`, err.message);
+      try {
+        userRow = await fetchUserBasicIdentityById(supabaseAdmin, m.user_id);
+      } catch (userErr) {
+        console.error("❌ Failed to fetch user for renewal email:", m.user_id, userErr);
+      }
+
+      if (!userRow?.email) {
+        console.warn("⚠️ No email found for recovery flow:", m.user_id);
+        continue;
+      }
+      
+      await sendFailedPaymentEmail({
+        to: userRow.email,
+        fullName: userRow.full_name || "Member",
+        portalUrl: portal.url,
+      });
+
+      console.log("✅ Sent recovery flow:", m.user_id, portal.url);
+    } catch (e) {
+      console.error("❌ Recovery loop error:", m.user_id, e?.message || e);
     }
   }
 
-  return Response.json({ message: "Auto-renewals processed" });
-}
-
-export async function GET() {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL}/api/trigger-renewal`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.INTERNAL_SECRET}`,
-    },
-  });
-
-  const data = await res.json();
-  console.log("🧪 Manual trigger test result:", data);
-
-  return new Response(JSON.stringify(data), {
-    status: res.status,
-    headers: { "Content-Type": "application/json" },
+  return Response.json({ 
+    message: "Recovery processed",
+    processed: memberships.length,
   });
 }

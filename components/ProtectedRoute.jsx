@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { fetchUserByIdClient } from "@/lib/queries/users.client";
 
 const ProtectedRoute = ({ children, roleRequired }) => {
   const [user, setUser] = useState(null);
@@ -23,22 +24,25 @@ const ProtectedRoute = ({ children, roleRequired }) => {
 
       setUser(user);
 
-      // Fetch the user's role from the 'users' table
-      const { data, error: roleError } = await supabase
-        .from("users")
-        .select("role")
-        .eq("id", user.id)
-        .single();
+      // Fetch the user's role from the users table
+      let userRow = null;
 
-      if (roleError) {
+      try {
+        userRow = await fetchUserByIdClient(user.id, "role");
+      } catch (roleError) {
         console.error("Error fetching role:", roleError);
         return;
       }
 
-      setRole(data.role);
+      if (!userRow) {
+        console.error("No user profile found for authenticated user.");
+        return;
+      }
+
+      setRole(userRow.role);
 
       // Redirect if user role does not match
-      if (roleRequired && data.role !== roleRequired) {
+      if (roleRequired && userRow.role !== roleRequired) {
         router.push("/"); // Redirect to homepage or another page
       }
     };

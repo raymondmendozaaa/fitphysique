@@ -3,6 +3,8 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { fetchLatestMembershipClient } from "@/lib/queries/memberships.client";
+import { fetchUserByIdClient } from "@/lib/queries/users.client";
 
 const UserContext = createContext(null);
 
@@ -45,13 +47,18 @@ export function UserProvider({ children }) {
     setUser(currentUser);
 
     // 2) App-level user record
-    const { data: userData, error: userError } = await supabase
-      .from("users")
-      .select("role, onboarded, profile_url")
-      .eq("id", currentUser.id)
-      .single();
+    let userData = null;
 
-    if (!userError && userData) {
+    try {
+      userData = await fetchUserByIdClient(
+        currentUser.id,
+        "role, onboarded, profile_url"
+      );
+    } catch (userError) {
+      console.error("❌ Failed to fetch user context data:", userError);
+    }
+
+    if (userData) {
       setRole(userData.role);
       setOnboarded(userData.onboarded);
 
@@ -65,38 +72,26 @@ export function UserProvider({ children }) {
       setHasRealPhoto(false);
     }
 
-    // 3) Latest membership (if any)
-    const { data: membershipRow, error: membershipError } = await supabase
-      .from("memberships")
-      .select(
-        `
-          id,
-          status,
-          start_date,
-          expires_at,
-          plan_durations (
-            id,
-            plan_name,
-            duration_label,
-            is_promotional
-          )
-        `
-      )
-      .eq("user_id", currentUser.id)
-      .order("start_date", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+  // 3) Latest membership (if any)
+    let membershipRow = null;
 
-    if (!membershipError && membershipRow) {
+    try {
+      membershipRow = await fetchLatestMembershipClient(currentUser.id);
+    } catch (membershipError) {
+      console.error("❌ Failed to fetch latest membership:", membershipError);
+    }
+
+    if (membershipRow) {
       setHasMembership(true);
       setMembershipData({
         id: membershipRow.id,
         status: membershipRow.status,
         start_date: membershipRow.start_date,
         expires_at: membershipRow.expires_at,
-        plan_name: membershipRow.plan_durations?.plan_name ?? null,
-        duration_label: membershipRow.plan_durations?.duration_label ?? null,
-        is_promotional: membershipRow.plan_durations?.is_promotional ?? false,
+        grace_ends_at: membershipRow.grace_ends_at,
+        plan_name: membershipRow.plan_duration?.plan_name ?? null,
+        duration_label: membershipRow.plan_duration?.duration_label ?? null,
+        is_promotional: membershipRow.plan_duration?.is_promotional ?? false,
       });
     } else {
       setHasMembership(false);

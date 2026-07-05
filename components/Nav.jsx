@@ -41,7 +41,7 @@ const Nav = ({ containerStyles }) => {
               : "text-gray-500 hover:text-accent text-opacity-70"}
           `}
         >
-          {id.charAt(0) + id.slice(1)}
+          {id.charAt(0).toUpperCase() + id.slice(1)}
         </ScrollLink>
       ))}
     </nav>

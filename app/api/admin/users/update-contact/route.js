@@ -1,11 +1,12 @@
 // app/api/admin/users/update-contact/route.js
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sendAdminAlertEmail } from '@/lib/email/sendAdminAlertEmail';
+import { getNowUtcIso, toValidDate } from "@/lib/utils/dateTime";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 function clientWithToken(req) {
   const token = req.headers.get('authorization') || req.headers.get('Authorization') || '';
@@ -15,15 +16,20 @@ function clientWithToken(req) {
 }
 
 function adminClient() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+  return supabaseAdmin;
 }
 
 function firstIpFromHeader(value) {
   if (!value) return null;
   const first = value.split(',')[0]?.trim();
   return first || null;
+}
+
+function getUtcIsoMinutesAgo(minutes) {
+  const now = toValidDate(getNowUtcIso());
+  if (!now) return getNowUtcIso();
+
+  return new Date(now.getTime() - minutes * 60 * 1000).toISOString();
 }
 
 // centralized audit helper
@@ -50,31 +56,21 @@ async function logAudit({ admin, callerId, userId, action, changed, result, emai
   });
 }
 
-// lightweight rate-limit: max 20 edits/min per admin
-async function checkRateLimit({ admin, callerId }) {
-  const { data, error } = await admin
-    .from('admin_audit_logs')
-    .select('id', { count: 'exact', head: true })
-    .eq('admin_id', callerId)
-    .gte('created_at', new Date(Date.now() - 60 * 1000).toISOString());
-
-  if (error) return { ok: true }; // fail-open (don’t block on count issue)
-  const recentCount = data?.length === 0 ? 0 : (data?.length || 0); // head:true returns no rows; count is not directly returned here
-  // Workaround: Supabase head:true puts count in response.count (not data). Let's fetch it properly:
-  return { ok: true, recentCount: (error ? 0 : undefined) };
-}
-
 // Proper count fetch (Supabase JS nuance)
 async function getRecentCount({ admin, callerId }) {
   const { count } = await admin
     .from('admin_audit_logs')
     .select('id', { count: 'exact', head: true })
     .eq('admin_id', callerId)
-    .gte('created_at', new Date(Date.now() - 60 * 1000).toISOString());
+    .gte('created_at', getUtcIsoMinutesAgo(1));
   return count || 0;
 }
 
 export async function POST(req) {
+  if (process.env.VERCEL_ENV === "preview") {
+    return new Response("Admin API disabled in Preview", { status: 403 });
+  }
+
   const ACTION = 'update_contact';
   const admin = adminClient();
 
@@ -208,13 +204,12 @@ export async function POST(req) {
       const targetName = targetUserRow.full_name || targetUserRow.email || userId;
       await sendAdminAlertEmail({
         subject: '⚠️ Member email changed',
-        text:
-`Admin ${adminName} changed ${targetName}'s email:
-${targetUserRow.email} → ${email}
-
-Reason: ${reason || '(none)'}
-Time: ${new Date().toISOString()}
-`
+        text: `Admin ${adminName} changed ${targetName}'s email:
+      ${targetUserRow.email} → ${email}
+            
+      Reason: ${reason || '(none)'}
+      Time: ${getNowUtcIso()}
+      `,
       });
     }
 

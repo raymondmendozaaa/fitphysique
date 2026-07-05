@@ -1,6 +1,5 @@
 "use client";
 
-
 import { useState, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { createStripeSession } from "@/lib/utils/stripeSession";
@@ -12,19 +11,16 @@ import {
   dismissToast,
 } from "@/lib/utils/toastUtils";
 import useCurrentUser from "@/lib/hooks/useCurrentUser";
+import { fetchPlanDurationByIdClient } from "@/lib/queries/planDurations.client";
 
 export default function ContractPageInner() {
   const searchParams = useSearchParams();
   const router = useRouter();
-
-  // 🔹 SIMPLIFIED: just user + loading, no role/effectiveRole
   const { user, loading: userLoading } = useCurrentUser();
-
   const source = searchParams.get("source") || "member";
-  const isAdminMode = source === "admin";
-
-  const [userId, setUserId] = useState("");
-  const [planDurationId, setPlanDurationId] = useState("");
+  const isAdminGeneratedLink = source === "admin";
+  const userId = searchParams.get("user_id") || "";
+  const planDurationId = searchParams.get("plan_duration_id") || "";
   const [agreeChecked, setAgreeChecked] = useState(false);
   const [typedName, setTypedName] = useState("");
   const [paidInFull, setPaidInFull] = useState(false);
@@ -37,12 +33,26 @@ export default function ContractPageInner() {
   const [longitude, setLongitude] = useState(null);
   const [ipAddress, setIpAddress] = useState(null);
   const [accuracy, setAccuracy] = useState(null);
-  const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(false);
   const [locations, setLocations] = useState([]);
   const [selectedLocation, setSelectedLocation] = useState("");
   const [planName, setPlanName] = useState("");
   const [durationLabel, setDurationLabel] = useState("");
+
+  const intendedUserId = userId || "";
+  const effectiveUserId = user?.id || "";
+  const isWrongUser =
+    !!intendedUserId &&
+    !!effectiveUserId &&
+    intendedUserId !== effectiveUserId;
+
+  const ready =
+    !!effectiveUserId &&
+    !isWrongUser &&
+    !!planDurationId &&
+    !!contractId &&
+    !!contractText &&
+    !!selectedLocation;
 
   // 🔹 Simple "must be logged in" guard
   useEffect(() => {
@@ -56,6 +66,16 @@ export default function ContractPageInner() {
       }
     }
   }, [userLoading, user, router]);
+
+  useEffect(() => {
+    if (userLoading) return;
+    if (!user) return;
+    
+    if (isWrongUser) {
+      showError("This contract link is for a different member account.");
+      router.replace("/member");
+    }
+  }, [userLoading, user, isWrongUser, router]);
 
   useEffect(() => {
     const fetchLocations = async () => {
@@ -83,14 +103,10 @@ export default function ContractPageInner() {
   }, []);
 
   useEffect(() => {
-    const uid = searchParams.get("user_id");
-    const pid = searchParams.get("plan_duration_id");
+    const pid = planDurationId;
 
-    console.log("🧠 useEffect - uid from URL:", uid);
-    console.log("🧠 useEffect - pid from URL:", pid);
-
-    if (uid) setUserId(uid);
-    if (pid) setPlanDurationId(pid);
+    console.log("🧠 useEffect - userId from URL:", userId);
+    console.log("🧠 useEffect - planDurationId from URL:", pid);
 
     const paidParam =
       searchParams.get("paid_in_full") ?? searchParams.get("pif");
@@ -106,15 +122,17 @@ export default function ContractPageInner() {
     const discountRenew =
       discountRenewParam === "true" || discountRenewParam === "1";
 
-    console.log("🚀 Params:", { uid, pid, paid, autoRenew, discountRenew });
+    console.log("🚀 Params:", { userId, pid, paid, autoRenew, discountRenew });
 
     setPaidInFull(paid);
     setAutoRenewal(autoRenew);
     setRenewAtDiscountedRate(discountRenew);
 
-    if (pid) {
-      const fetchContract = async () => {
-        const [{ data: contract }, { data: pd }] = await Promise.all([
+    if (!pid) return;
+
+    const fetchContract = async () => {
+      try {
+        const [{ data: contract, error: contractError }, pd] = await Promise.all([
           supabase
             .from("contracts")
             .select("*")
@@ -122,32 +140,37 @@ export default function ContractPageInner() {
             .order("version", { ascending: false })
             .limit(1)
             .single(),
-          supabase
-            .from("plan_durations")
-            .select("plan_name, duration_label")
-            .eq("id", pid)
-            .single(),
+          fetchPlanDurationByIdClient(pid),
         ]);
 
-        if (contract) {
-          setContractText(contract.content);
-          setContractId(contract.id);
-          setContractVersion(contract.version);
-        } else {
-          console.error("No contract found for this plan.");
+        if (contractError) {
+          console.error("Failed to load contract:", contractError);
+          showError("Failed to load contract.");
+          return;
         }
+
+        if (!contract) {
+          console.error("No contract found for this plan.");
+          showError("No contract found for this plan.");
+          return;
+        }
+
+        setContractText(contract.content || "");
+        setContractId(contract.id || "");
+        setContractVersion(contract.version || "");
 
         if (pd) {
           setPlanName(pd.plan_name || "");
           setDurationLabel(pd.duration_label || "");
         }
+      } catch (err) {
+        console.error("Failed to load contract page data:", err);
+        showError("Failed to load contract.");
+      }
+    };
 
-        if (uid && pid) setReady(true);
-      };
-
-      fetchContract();
-    }
-  }, [searchParams]);
+    fetchContract();
+  }, [planDurationId, userId, searchParams]);
 
   useEffect(() => {
     if ("geolocation" in navigator) {
@@ -186,8 +209,13 @@ export default function ContractPageInner() {
       return;
     }
 
-    const uid = userId;
+    const uid = effectiveUserId;
     const pid = planDurationId;
+
+    if (!uid) {
+      showError("Missing user information.");
+      return;
+    }
 
     console.log("🧪 handleSubmit - userId:", uid);
     console.log("🧪 handleSubmit - planDurationId:", pid);
@@ -204,16 +232,27 @@ export default function ContractPageInner() {
     setLoading(true);
 
     try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      
+      if (!session?.access_token) {
+        throw new Error("Missing active session. Please log in again.");
+      }
+      
       const sigRes = await fetch("/api/sign-contract", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
         body: JSON.stringify({
           userId: uid,
           planDurationId: pid,
-          contractId: contractId,
+          contractId,
           signature: typedName,
           agreed: agreeChecked,
-          contractVersion: contractVersion,
+          contractVersion,
           latitude,
           longitude,
           accuracy,
@@ -298,9 +337,9 @@ export default function ContractPageInner() {
 
             {/* Tiny meta chips like dashboard (optional) */}
             <div className="flex flex-wrap gap-2 mt-3">
-              {userId && (
+              {isAdminGeneratedLink && userId && (
                 <span className="text-[11px] px-2 py-1 rounded-md border border-gray-700 text-gray-300">
-                  <span className="text-gray-500">User:</span> {userId}
+                  <span className="text-gray-500">Intended member:</span> {userId}
                 </span>
               )}
               {ipAddress && (
@@ -365,6 +404,10 @@ export default function ContractPageInner() {
                 ))}
               </select>
             </div>
+
+            <p className="text-xs text-gray-500">
+              Billing, renewal, and access timing are processed based on America/Chicago.
+            </p>
 
             <button
               type="submit"

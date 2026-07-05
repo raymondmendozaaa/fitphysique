@@ -31,6 +31,10 @@ function isStaff(role) {
 // --- Route: POST --------------------------------------------
 // Body: { userId, channel?, override?, override_reason?, purpose?, next? }
 export async function POST(req) {
+  if (process.env.VERCEL_ENV === "preview") {
+    return new Response("Admin API disabled in Preview", { status: 403 });
+  }
+
   try {
     const {
       userId,

@@ -2,6 +2,11 @@
 'use client';
 import { useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { 
+  getTodayDateInputValue, 
+  formatAdminDate,
+  isValidDateInput 
+} from '@/lib/utils/dateTime';
 
 export default function MembershipControls({ membershipId, onChanged }) {
   const [busy, setBusy] = useState(false);
@@ -9,7 +14,7 @@ export default function MembershipControls({ membershipId, onChanged }) {
   const [billingDate, setBillingDate] = useState('');
   const [pauseUntil, setPauseUntil] = useState('');
   const [pauseBilling, setPauseBilling] = useState(false);
-  const [graceStart, setGraceStart] = useState(() => new Date().toISOString().slice(0,10));
+  const [graceStart, setGraceStart] = useState(() => getTodayDateInputValue());
   const [graceEnd, setGraceEnd] = useState('');
 
   const [msg, setMsg] = useState('');
@@ -41,18 +46,21 @@ export default function MembershipControls({ membershipId, onChanged }) {
 
   // helpers
   const billingAnchorDay = (() => {
-    if (!billingDate) return null;
-    const d = new Date(billingDate);
-    if (Number.isNaN(d.getTime())) return null;
-    return Math.max(1, Math.min(28, d.getDate()));
+    if (!isValidDateInput(billingDate)) return null;
+
+    const day = Number(billingDate.slice(8, 10));
+    if (!Number.isFinite(day)) return null;
+
+    return Math.max(1, Math.min(28, day));
   })();
   const billingValid = billingAnchorDay !== null;
-  const pauseValid = !pauseUntil || !Number.isNaN(new Date(pauseUntil).getTime());
+  const pauseValid = !pauseUntil || isValidDateInput(pauseUntil);
   const graceValid = (() => {
-    if (!graceStart || !graceEnd) return false;
-    const s = new Date(graceStart);
-    const e = new Date(graceEnd);
-    return !Number.isNaN(s.getTime()) && !Number.isNaN(e.getTime()) && e > s;
+    if (!isValidDateInput(graceStart) || !isValidDateInput(graceEnd)) {
+      return false;
+    }
+  
+    return graceEnd > graceStart;
   })();
 
   return (
@@ -125,7 +133,7 @@ export default function MembershipControls({ membershipId, onChanged }) {
                   `/api/admin/memberships/${membershipId}/pause`,
                   { until: pauseUntil || null, pause_billing: pauseBilling },
                   pauseUntil
-                    ? `Paused until ${new Date(pauseUntil).toLocaleDateString()}${pauseBilling ? ' (billing paused)' : ''}.`
+                    ? `Paused until ${formatAdminDate(pauseUntil)}${pauseBilling ? ' (billing paused)' : ''}.`
                     : 'Pause cleared.'
                 );
               }}
@@ -185,7 +193,7 @@ export default function MembershipControls({ membershipId, onChanged }) {
                 await call(
                   `/api/admin/memberships/${membershipId}/set-grace`,
                   { start: graceStart, end: graceEnd },
-                  `Grace set: ${new Date(graceStart).toLocaleDateString()} → ${new Date(graceEnd).toLocaleDateString()}.`
+                  `Grace set: ${formatAdminDate(graceStart)} → ${formatAdminDate(graceEnd)}.`
                 );
               }}
               className="px-3 py-2 rounded bg-yellow-500 text-black disabled:opacity-50"
