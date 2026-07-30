@@ -24,6 +24,8 @@ export default function FiltersPanel({
         >
           <option value="">All Statuses</option>
           <option value="active">Active</option>
+          <option value="past_due">Past Due</option>
+          <option value="scheduled">Scheduled</option>
           <option value="expired">Expired</option>
           <option value="cancelled">Cancelled</option>
           <option value="suspended">Suspended</option>

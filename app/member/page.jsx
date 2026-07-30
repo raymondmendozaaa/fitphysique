@@ -24,6 +24,7 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
   const [contractEndDateValue, setContractEndDateValue] = useState(null);
   const [nextPaymentDateValue, setNextPaymentDateValue] = useState(null);
   const [graceEndsAtValue, setGraceEndsAtValue] = useState(null);
+  const [cancelReasonValue, setCancelReasonValue] = useState(null);
   const [currentPlan, setCurrentPlan] = useState("None");
   const [isExpired, setIsExpired] = useState(false);
   const [membershipStatus, setMembershipStatus] = useState("inactive");
@@ -108,6 +109,7 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       setCurrentPlan(planName);
       setHasActiveContract(hasContract);
       setStripeSubId(subId);
+      setCancelReasonValue(membershipData.cancel_reason || null);
 
       // ✅ Contract End Date
       const contractEndDate = toValidDate(membershipData.contract_end_date);
@@ -153,6 +155,7 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       setNextPaymentDateValue(null);
       setStripeSubId(null);
       setAutoRenewalEnabled(false);
+      setCancelReasonValue(null);
     } else if (latestMembership) {
       const latestStatus = String(latestMembership.status || "").toLowerCase();
       const latestExpiresAt = toValidDate(latestMembership.expires_at);
@@ -176,6 +179,7 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       setNextPaymentDateValue(null);
       setStripeSubId(null);
       setAutoRenewalEnabled(!!latestMembership.auto_renewal_enabled);
+      setCancelReasonValue(latestMembership.cancel_reason || null);
     } else {
       setIsExpired(true);
       setCurrentPlan("None");
@@ -186,6 +190,7 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
       setNextPaymentDateValue(null);
       setStripeSubId(null);
       setAutoRenewalEnabled(false);
+      setCancelReasonValue(null);
     }
   };
 
@@ -217,7 +222,7 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
     }
 
     const confirmed = confirm(
-      "Are you sure you want to cancel your membership? You’ll still have access until the end of your billing period."
+      "Are you sure you want to cancel your membership? You’ll keep access until your current access period ends."
     );
     if (!confirmed) return;
 
@@ -325,6 +330,12 @@ const MemberDashboard = ({ user, role, profileUrl }) => {
           <span className="underline">
             {graceEndsAtValue ? formattedGraceEndsAt : formattedContractEndDate}
           </span>.
+
+          {cancelReasonValue && (
+            <div className="mt-2 text-xs text-yellow-200/80 font-normal">
+              Reason: {cancelReasonValue}
+            </div>
+          )}
         </div>
       )}
 

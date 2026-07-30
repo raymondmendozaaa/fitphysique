@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
-import { fetchUserById, fetchUserById, updateUserById } from "@/lib/db/users";
+import { fetchUserById, updateUserById } from "@/lib/db/users";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 

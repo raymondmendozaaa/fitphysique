@@ -34,7 +34,8 @@ export async function POST(req) {
 
     const body = await req.json().catch(() => ({}));
     const cancellationReason =
-      typeof body?.cancellationReason === "string"
+      typeof body?.cancellationReason === "string" &&
+      body.cancellationReason.trim()
         ? body.cancellationReason.trim()
         : null;
 
@@ -52,6 +53,7 @@ export async function POST(req) {
     }
 
     return NextResponse.json({
+      ok: true,
       message:
         result.message ||
         "Membership will not renew. Access remains through the current access period.",
