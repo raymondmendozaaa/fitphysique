@@ -1,15 +1,36 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { createServerClient } from "@supabase/ssr";
+import { cookies } from "next/headers";
 import { Resend } from "resend";
-import { fetchUserById } from "@/lib/db/users";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Admin Supabase client (SERVICE ROLE)
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+async function createAuthClient() {
+  const cookieStore = await cookies();
+
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    }
+  );
+}
 
 function getBaseUrl() {
   return (
@@ -26,23 +47,29 @@ const FROM_EMAIL =
 const DEV_TEST_RECIPIENT =
   process.env.RESEND_DEV_TEST_EMAIL || "raymondoza28@gmail.com";
 
-export async function POST(req) {
+export async function POST() {
   try {
-    const { user_id } = await req.json();
+    const authClient = await createAuthClient();
 
-    if (!user_id) {
+    const {
+      data: { user: authUser },
+      error: authError,
+    } = await authClient.auth.getUser();
+
+    if (authError || !authUser) {
       return NextResponse.json(
-        { ok: false, error: "Missing user_id." },
-        { status: 400 }
+        { ok: false, error: "Unauthorized." },
+        { status: 401 }
       );
     }
 
-    // 1️⃣ Look up the user in your "users" table
-    let user;
+    const { data: user, error: userError } = await supabaseAdmin
+      .from("users")
+      .select("id, email, full_name")
+      .eq("id", authUser.id)
+      .maybeSingle();
 
-    try {
-      user = await fetchUserPasswordResetIdentityById(supabaseAdmin, user_id);
-    } catch (userError) {
+    if (userError) {
       console.error("[send-password-reset] User lookup failed:", userError);
       return NextResponse.json(
         { ok: false, error: "Failed to load user." },
@@ -67,7 +94,6 @@ export async function POST(req) {
     const baseUrl = getBaseUrl();
     const redirectTo = `${baseUrl}/auth/password-reset`;
 
-    // 2️⃣ Ask Supabase to create a "recovery" link
     const { data: linkData, error: linkError } =
       await supabaseAdmin.auth.admin.generateLink({
         type: "recovery",
@@ -96,13 +122,12 @@ export async function POST(req) {
       );
     }
 
-    // 3️⃣ Force redirect_to to match our baseUrl (local or prod)
     let resetUrl = rawLink;
+
     try {
       const url = new URL(rawLink);
       url.searchParams.set("redirect_to", redirectTo);
       resetUrl = url.toString();
-      console.log("[send-password-reset] resetUrl (rewritten):", resetUrl);
     } catch (e) {
       console.warn(
         "[send-password-reset] Failed to rewrite redirect_to, using raw URL",
@@ -110,7 +135,6 @@ export async function POST(req) {
       );
     }
 
-    // 4️⃣ Build the email body
     const subject = "Reset your Fit Physique password";
     const html = `
       <p>Hi ${user.full_name || "there"},</p>
@@ -125,7 +149,6 @@ export async function POST(req) {
       </p>
     `;
 
-    // 5️⃣ Decide who it goes to (Resend dev sandbox)
     const toEmail =
       process.env.NODE_ENV === "development" ? DEV_TEST_RECIPIENT : user.email;
 
@@ -137,10 +160,8 @@ export async function POST(req) {
     });
 
     if (resendError) {
-      console.error(
-        "[send-password-reset] Resend send error:",
-        resendError
-      );
+      console.error("[send-password-reset] Resend send error:", resendError);
+
       const message =
         resendError.message ||
         "Failed to send password reset email with Resend.";
@@ -163,6 +184,7 @@ export async function POST(req) {
     return NextResponse.json({ ok: true });
   } catch (e) {
     console.error("[send-password-reset] error:", e);
+
     return NextResponse.json(
       {
         ok: false,

@@ -253,33 +253,30 @@ function AccountPage({ user, profileUrl }) {
       showError("We couldn't find your account.");
       return;
     }
-
+  
     setSendingReset(true);
     const toastId = showLoading("Sending password reset email...");
-
+  
     try {
       const res = await fetch("/api/member/send-password-reset", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: user.id }),
       });
-
+    
       const body = await res.json().catch(() => ({}));
-
+    
       if (!res.ok) {
         throw new Error(
           body?.error || "Could not send reset email. Please try again."
         );
       }
-
+    
       dismissToast(toastId);
       showSuccess("If that email exists, we've sent a password reset link.");
     } catch (err) {
       console.error("[Account] handleSendPasswordReset error:", err);
       dismissToast(toastId);
       showError(
-        err.message ||
-          "Something went wrong while sending the reset email."
+        err.message || "Something went wrong while sending the reset email."
       );
     } finally {
       setSendingReset(false);
