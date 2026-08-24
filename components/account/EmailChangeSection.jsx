@@ -51,65 +51,77 @@ export default function EmailChangeSection() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (saving) return;
-
-    if (!newEmail || newEmail.trim() === "") {
+    
+    const trimmedNewEmail = newEmail.trim();
+    
+    if (!trimmedNewEmail) {
       showError("Please enter a new email.");
       return;
     }
-
-    if (newEmail.trim() === currentEmail) {
+  
+    if (trimmedNewEmail === currentEmail) {
       showError("New email must be different from your current email.");
       return;
     }
-
+  
     const basicEmailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!basicEmailRegex.test(newEmail.trim())) {
+    if (!basicEmailRegex.test(trimmedNewEmail)) {
       showError("Please enter a valid email address.");
       return;
     }
-
+  
     if (!currentPassword) {
       showError("Please enter your current password to confirm this change.");
       return;
     }
-
+  
     setSaving(true);
-    const toastId = showLoading("Verifying your password...");
-
+  
+    let toastId = null;
+  
     try {
+      toastId = showLoading("Verifying your password...");
+    
       // Step 1: re-authenticate with current password
       const { error: signInError } = await supabase.auth.signInWithPassword({
         email: currentEmail,
         password: currentPassword,
       });
-
+    
       if (signInError) {
         console.error("[account] signInWithPassword error:", signInError);
         throw new Error("Current password is incorrect.");
       }
-
-      // Step 2: actually update the email
+    
       dismissToast(toastId);
-      const toastId2 = showLoading("Updating your email...");
-
+      toastId = showLoading("Updating your email...");
+    
+      // Step 2: actually update the email
       const { error: updateError } = await supabase.auth.updateUser({
-        email: newEmail.trim(),
+        email: trimmedNewEmail,
       });
-
+    
       if (updateError) {
         console.error("[account] updateUser email error:", updateError);
         throw new Error(updateError.message || "Failed to update email.");
       }
-
+    
+      dismissToast(toastId);
+      toastId = null;
+    
       showSuccess(
         "We sent a confirmation link to your new email. Click it to finish updating."
       );
+    
       setNewEmail("");
       setCurrentPassword("");
-      dismissToast(toastId2);
     } catch (err) {
       console.error("[account] email change error:", err);
-      dismissToast(toastId);
+    
+      if (toastId) {
+        dismissToast(toastId);
+      }
+    
       showError(err.message || "Something went wrong updating your email.");
     } finally {
       setSaving(false);
