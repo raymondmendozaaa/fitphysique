@@ -4,31 +4,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   formatAdminDateTime,
-  getStartOfDayUtcIso,
-  getStartOfNextDayUtcIso,
-  getTodayDateInputValue,
+  getTodayDateInputValue
 } from '@/lib/utils/dateTime';
-
-const CHECKINS_SELECT = `
-  id,
-  checkin_time,
-  user_id,
-  full_name,
-  email,
-  location_id,
-  location_name,
-  geofence_radius_m,
-  cooldown_seconds,
-  max_accuracy_meters,
-  conservative_geofence,
-  checkin_type,
-  distance_meters,
-  accuracy_meters,
-  guest_pass_id,
-  membership_id,
-  membership_status,
-  membership_expires_at
-`;
 
 function distanceBadgeMeta(distance, radius) {
   if (typeof distance !== 'number' || !Number.isFinite(distance)) {
@@ -219,75 +196,75 @@ export default function AdminCheckinsPage() {
   }, [rows]);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const { data: locs, error } = await supabase
-          .from('locations')
-          .select('id, name')
-          .order('name', { ascending: true });
+  let isActive = true;
 
-        if (error) throw error;
-        setLocations(locs || []);
-      } catch (e) {
-        console.error('Failed to load locations:', e);
-      }
-    })();
-  }, []);
+  (async () => {
+    setLoading(true);
+    setErr(null);
 
-  useEffect(() => {
-    let isActive = true;
-
-    (async () => {
-      setLoading(true);
-      setErr(null);
-
-      try {
-        if (start && end && start > end) {
-          if (!isActive) return;
-          setRows([]);
-          setErr('Start date cannot be after end date.');
-          return;
-        }
-
-        const startUtc = start ? getStartOfDayUtcIso(start) : null;
-        const endUtcExclusive = end ? getStartOfNextDayUtcIso(end) : null;
-
-        let q = supabase
-          .from('v_checkins_enriched')
-          .select(CHECKINS_SELECT)
-          .order('checkin_time', { ascending: false });
-
-        if (startUtc) q = q.gte('checkin_time', startUtc);
-        if (endUtcExclusive) q = q.lt('checkin_time', endUtcExclusive);
-
-        if (locationId) q = q.eq('location_id', locationId);
-        if (method) q = q.eq('checkin_type', method);
-
-        const trimmedSearch = search.trim();
-        if (trimmedSearch) {
-          const term = `%${trimmedSearch}%`;
-          q = q.or(`full_name.ilike.${term},email.ilike.${term}`);
-        }
-
-        const { data, error } = await q;
-        if (error) throw error;
-
+    try {
+      if (start && end && start > end) {
         if (!isActive) return;
-        setRows(data || []);
-        setPage(1);
-      } catch (e) {
-        if (!isActive) return;
-        console.error('Failed to load check-ins:', e);
-        setErr('Failed to load check-ins.');
-      } finally {
-        if (isActive) setLoading(false);
+        setRows([]);
+        setErr("Start date cannot be after end date.");
+        return;
       }
-    })();
 
-    return () => {
-      isActive = false;
-    };
-  }, [start, end, locationId, method, search]);
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError) throw sessionError;
+
+      if (!session?.access_token) {
+        throw new Error("You must be signed in as an admin to view check-ins.");
+      }
+
+      const params = new URLSearchParams();
+
+      if (start) params.set("start", start);
+      if (end) params.set("end", end);
+      if (locationId) params.set("locationId", locationId);
+      if (method) params.set("method", method);
+
+      const trimmedSearch = search.trim();
+      if (trimmedSearch) params.set("search", trimmedSearch);
+
+      const res = await fetch(`/api/admin/checkins?${params.toString()}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        cache: "no-store",
+      });
+
+      const body = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(body?.error || "Failed to load check-ins.");
+      }
+
+      if (!isActive) return;
+
+      setRows(Array.isArray(body.rows) ? body.rows : []);
+      setLocations(Array.isArray(body.locations) ? body.locations : []);
+      setPage(1);
+    } catch (e) {
+      if (!isActive) return;
+
+      console.error("Failed to load check-ins:", e);
+      setRows([]);
+      setErr(e.message || "Failed to load check-ins.");
+    } finally {
+      if (isActive) setLoading(false);
+    }
+  })();
+
+  return () => {
+    isActive = false;
+  };
+}, [start, end, locationId, method, search]);
 
   return (
     <div className="p-8 min-h-screen bg-gray-900 text-white">
